@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cursor-rule-reader": {
+      "command": "ippro-tool",
+      "args": [
+        "mcp-server",
+        "--workspace",
+        "."
+      ]
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "ippro-tool signal-hook",
+        "failClosed": false
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "ippro-tool prompt-guard",
+        "failClosed": false
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "ippro-tool post-read-guard",
+        "matcher": "Read",
+        "failClosed": false
+      }
+    ]
+  }
+}

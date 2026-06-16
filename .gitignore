@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+exports/
+
+# OS / IDE
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

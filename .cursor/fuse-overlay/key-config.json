@@ -1,0 +1,113 @@
+{
+  "_comment": "Key management configuration. Created by: Digital COE Gen AI Team",
+  "_warning": "This file contains NO secrets when using platform-keystore. The encryption key is in the OS keystore.",
+  "keyProvider": "platform-keystore",
+  "platformKeystore": {
+    "service": "cursor-rule-encryption",
+    "account": "aes-key",
+    "algorithm": "aes-256-gcm",
+    "encoding": "hex"
+  },
+  "keyServer": {
+    "type": "gitlab",
+    "host": "https://gitlab.corp.amdocs.com",
+    "projectId": "25691",
+    "filePath": "keys/encryption-key.json",
+    "branch": "master",
+    "auth": "private",
+    "authService": "cursor-rule-server",
+    "authAccount": "auth-token",
+    "rejectUnauthorized": false,
+    "timeoutMs": 5000,
+    "rulesPath": "rules",
+    "keyVersion": 1,
+    "lastFetched": "2026-05-06T09:50:16.997Z"
+  },
+  "ruleSources": [
+    {
+      "_comment": "Public repo example — encrypted rules (no PAT needed to fetch .enc files)",
+      "name": "shared-encrypted-rules",
+      "active": "no",
+      "type": "gitlab",
+      "host": "https://gitlab.corp.amdocs.com",
+      "projectId": "YOUR_PROJECT_ID",
+      "branch": "master",
+      "rulesPath": "rules",
+      "destPath": ".cursor/rules",
+      "auth": "public"
+    },
+    {
+      "_comment": "Public repo — encrypted rules (no PAT needed to fetch .enc files)",
+      "name": "Digital Development Rules",
+      "active": "no",
+      "type": "gitlab",
+      "host": "https://gitlab.corp.amdocs.com",
+      "projectId": "26111",
+      "branch": "master",
+      "rulesPath": "Foundation/Agentic Devpack/rules/digital/developmentRules",
+      "destPath": ".cursor/rules",
+      "auth": "public"
+    },
+    {
+      "_comment": "Encrypted persona doctrine files (*-PERSONA.mdc.enc) — synced to .cursor/rules/",
+      "name": "persona-doctrines",
+      "active": "no",
+      "type": "gitlab",
+      "host": "https://gitlab.corp.amdocs.com",
+      "projectId": "26111",
+      "branch": "master",
+      "rulesPath": "Foundation/Agentic Devpack/personas",
+      "destPath": ".cursor/rules",
+      "auth": "public"
+    },
+    {
+      "_comment": "Encrypted skills (SKILL.md + instructions.md.enc per subdirectory)",
+      "name": "team-skills",
+      "active": "no",
+      "type": "gitlab",
+      "host": "https://gitlab.corp.amdocs.com",
+      "projectId": "26111",
+      "branch": "master",
+      "rulesPath": "Foundation/Agentic Devpack/skills",
+      "destPath": ".cursor/skills",
+      "auth": "public",
+      "recursive": true,
+      "downloadAll": true
+    },
+    {
+      "_comment": "Private repo example — requires PAT from keystore (uncomment and configure)",
+      "name": "team-rules-example",
+      "active": "no",
+      "type": "gitlab",
+      "host": "https://gitlab.corp.amdocs.com",
+      "projectId": "YOUR_PROJECT_ID",
+      "branch": "main",
+      "rulesPath": [
+        "encrypted-rules",
+        "overrides/custom-rule.mdc.enc"
+      ],
+      "destPath": ".cursor/rules/team",
+      "auth": "private",
+      "authService": "cursor-rule-team",
+      "authAccount": "auth-token"
+    }
+  ],
+  "provisioning": {
+    "_comment": "Auto-setup via GitLab OAuth + CI/CD pipeline. No tokens stored here — only the public oauthClientId.",
+    "type": "gitlab-oauth-cicd",
+    "host": "https://gitlab.corp.amdocs.com",
+    "projectId": "26484",
+    "branch": "master",
+    "oauthClientId": "d9de6d3b87794bef9f71c5e09be393723f4f6f1b463bf86c93623e9c38b3db57",
+    "oauthScopes": "api",
+    "rejectUnauthorized": false,
+    "pollIntervalMs": 5000,
+    "timeoutMs": 180000
+  },
+  "config": {
+    "_comment": "Fallback disabled when using platform-keystore. Only used in legacy mode.",
+    "algorithm": "aes-256-gcm",
+    "key": "",
+    "encoding": "hex"
+  }
+}

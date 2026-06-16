@@ -1,0 +1,16 @@
+{
+  "_comment": "SHA-256 checksums for protected security files. FUSE overlay refuses to start if any file is tampered. Regenerate with: node integrity-checker.js generate",
+  "version": 1,
+  "generatedAt": "2026-05-06T09:50:45.517Z",
+  "files": {
+    ".cursor/rules/no-print-rules.mdc": {
+      "sha256": "735b6ce8d07ef815b96e2d8ee195adaea5e8938bbf0e7fadc237e04c91840d94"
+    },
+    ".cursor/rules/persona-bootstrap.mdc": {
+      "sha256": "38a028e34479762c86fb15c7c3b744c1ad4f92c6740a6eabaf960d9cfbaebf19"
+    },
+    ".cursor/hooks.json": {
+      "sha256": "28037a728b3cb3ec1b9992c151e74bd94993476bfb810f9a5270c850034b0935"
+    }
+  }
+}

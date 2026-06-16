@@ -1,0 +1,25 @@
+{
+  "name": "v21_prechecks_portal",
+  "version": "1.0.0",
+  "description": "Automation Portal scaffold with task run/skip controls",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "desktop": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "nodemailer": "^8.0.4"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

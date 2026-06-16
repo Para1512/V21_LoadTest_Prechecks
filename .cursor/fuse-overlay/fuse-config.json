@@ -1,0 +1,14 @@
+{
+  "_comment": "FUSE decryption overlay configuration. Created by: Digital COE Gen AI Team",
+  "_note": "Access control is hardcoded to Cursor agent ONLY in process-checker.js. There is no configurable allowlist by design.",
+  "mounts": [
+    {
+      "sourceDir": ".cursor/rules",
+      "mountPoint": ".cursor/rules",
+      "backingDir": ".cursor/.rules-source",
+      "_comment": "In-place mount: sourceDir == mountPoint. Real files move to backingDir during mount."
+    }
+  ],
+  "keyConfigPath": "./key-config.json",
+  "logLevel": "info"
+}
