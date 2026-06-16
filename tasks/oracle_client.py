@@ -6,6 +6,12 @@ import os
 from typing import Any
 
 
+from tasks.env_loader import env_diagnostics, load_project_env
+
+# Ensure .env is loaded when oracle_client is imported outside app.py (e.g. CLI script)
+load_project_env(create_from_example=True)
+
+
 def connection_config() -> dict[str, Any]:
     """Read ORACLE_* from environment (.env loaded by app.py)."""
     return {
@@ -86,17 +92,27 @@ def test_connection() -> dict[str, Any]:
         messages.append(f"  {status} — {c['name']}: {c['detail']}")
 
     if not all(c["passed"] for c in env_checks):
+        diag = env_diagnostics()
+        env_hint = (
+            f"Expected .env at: {diag.get('env_path')} "
+            f"(exists: {diag.get('env_exists')}). "
+        )
+        if not diag.get("env_exists"):
+            env_hint += (
+                "Run: copy .env.example .env in the project folder, or restart python app.py "
+                "(it auto-creates .env from .env.example on first start). "
+            )
+        else:
+            env_hint += "File exists but ORACLE_* lines may be commented or empty — open .env in Notepad. "
+        env_hint += ".env is not stored in GitHub."
         return {
             "success": False,
             "type": "oracle-connection-test",
             "connected": False,
             "checkpoints": checkpoints,
             "messages": messages,
-            "message": (
-                "Oracle .env configuration incomplete. On VDI after git clone, run: "
-                "copy .env.example .env — then edit .env and set ORACLE_USER, ORACLE_PASSWORD, "
-                "ORACLE_HOST, ORACLE_SERVICE_NAME (.env is not in GitHub)."
-            ),
+            "message": f"Oracle .env configuration incomplete. {env_hint}",
+            "envDiagnostics": diag,
         }
 
     cfg = connection_config()

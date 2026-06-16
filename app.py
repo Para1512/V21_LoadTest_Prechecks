@@ -20,16 +20,23 @@ from email.utils import make_msgid
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory, stream_with_context
 from flask_cors import CORS
 
 from tasks.reqcentral_status import check_reqcentral_issue
 from tasks.pet_health import PET_HEALTH_URL, run_pet_health_check
 from tasks.server_log_space import run_server_log_space_check
+from tasks.env_loader import load_project_env
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+_ENV_BOOT = load_project_env(create_from_example=True)
+if _ENV_BOOT.get("created_from_example"):
+    print(
+        f"[env] Created {_ENV_BOOT['env_path']} from .env.example — "
+        "edit ORACLE_PASSWORD if login fails, then restart."
+    )
+elif not _ENV_BOOT.get("env_exists"):
+    print(f"[env] WARNING: no .env at {_ENV_BOOT['env_path']}")
 PUBLIC_DIR = BASE_DIR / "public"
 
 app = Flask(__name__, static_folder=None)

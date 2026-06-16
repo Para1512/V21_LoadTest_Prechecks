@@ -9,9 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from dotenv import load_dotenv
+from tasks.env_loader import load_project_env
 
-load_dotenv(ROOT / ".env")
+load_project_env(create_from_example=True)
 
 from tasks.oracle_client import test_connection
 
