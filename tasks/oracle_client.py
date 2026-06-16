@@ -42,8 +42,8 @@ def config_checkpoints() -> list[dict[str, Any]]:
         {
             "id": "oracle-port",
             "name": "ORACLE_PORT set",
-            "passed": bool(cfg["port"]),
-            "detail": cfg["port"] or "missing",
+            "passed": bool((os.environ.get("ORACLE_PORT") or "").strip()),
+            "detail": (os.environ.get("ORACLE_PORT") or "").strip() or "missing (default 1532 used on connect)",
         },
         {
             "id": "oracle-service",
@@ -92,7 +92,11 @@ def test_connection() -> dict[str, Any]:
             "connected": False,
             "checkpoints": checkpoints,
             "messages": messages,
-            "message": "Oracle .env configuration incomplete. Copy .env.example → .env and fill ORACLE_* values.",
+            "message": (
+                "Oracle .env configuration incomplete. On VDI after git clone, run: "
+                "copy .env.example .env — then edit .env and set ORACLE_USER, ORACLE_PASSWORD, "
+                "ORACLE_HOST, ORACLE_SERVICE_NAME (.env is not in GitHub)."
+            ),
         }
 
     cfg = connection_config()
