@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -10,6 +11,8 @@ from urllib.parse import quote
 import requests
 
 VTS_REQUEST_TIMEOUT_S = 45
+VTS_JOB_POLL_INTERVAL_S = 2.0
+VTS_JOB_POLL_TIMEOUT_S = 300.0
 
 VTS1_MIN_COUNTS: dict[str, int] = {
     "P_BAN": 8000,
@@ -76,6 +79,174 @@ def clear_column_url(base_url: str, colname: str) -> str:
     return f"{vts_api_root(base_url)}/data/clear_column?colname={quote(colname, safe='')}"
 
 
+def job_status_url(base_url: str, job_id: int) -> str:
+    return f"{vts_api_root(base_url)}/data/job_status?jobid={job_id}"
+
+
+def _extract_job_id(detail: Any, response: requests.Response) -> int | None:
+    if isinstance(detail, dict):
+        for key in ("jobid", "jobId", "job_id", "id"):
+            val = detail.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+        for nest in ("job", "data", "result"):
+            nested = detail.get(nest)
+            if isinstance(nested, dict):
+                found = _extract_job_id(nested, response)
+                if found is not None:
+                    return found
+    if isinstance(detail, (int, float)) and not isinstance(detail, bool):
+        try:
+            return int(detail)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(detail, str):
+        stripped = detail.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    text = response.text or ""
+    for pattern in (
+        r'"jobid"\s*:\s*(\d+)',
+        r'"jobId"\s*:\s*(\d+)',
+        r'"job_id"\s*:\s*(\d+)',
+        r"jobid[=:](\d+)",
+        r"jobId[=:](\d+)",
+        r"\bjob\s*#?\s*(\d+)\b",
+    ):
+        m = re.search(pattern, text, re.I)
+        if m:
+            return int(m.group(1))
+    location = response.headers.get("Location") or response.headers.get("location") or ""
+    m = re.search(r"jobid=(\d+)", location, re.I)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _job_is_terminal(detail: Any) -> bool:
+    if isinstance(detail, dict):
+        status = str(detail.get("status") or detail.get("state") or "").lower()
+        if status in (
+            "complete",
+            "completed",
+            "done",
+            "success",
+            "successful",
+            "finished",
+            "failed",
+            "error",
+            "cancelled",
+            "canceled",
+        ):
+            return True
+        if detail.get("complete") is True or detail.get("finished") is True:
+            return True
+        if detail.get("done") is True:
+            return True
+        pct = detail.get("percent") or detail.get("progress") or detail.get("percentage")
+        if pct is not None:
+            try:
+                if float(pct) >= 100:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    if isinstance(detail, str):
+        lower = detail.lower().strip()
+        if lower.isdigit():
+            return int(lower) >= 100
+        if any(w in lower for w in ("complete", "finished", "failed", "error", "100%")):
+            return True
+    return False
+
+
+def _job_is_success(detail: Any) -> bool:
+    if isinstance(detail, dict):
+        status = str(detail.get("status") or detail.get("state") or "").lower()
+        if status in ("failed", "error", "cancelled", "canceled"):
+            return False
+        if detail.get("success") is False:
+            return False
+        if detail.get("error"):
+            return False
+    if isinstance(detail, str) and re.search(r"\b(fail|error)\b", detail, re.I):
+        return False
+    return True
+
+
+def _wait_for_column_counts(
+    base_url: str,
+    expected: dict[str, int],
+    *,
+    timeout_s: float = 45.0,
+    interval_s: float = 2.0,
+) -> dict[str, Any]:
+    """VTS counts can lag after job_status completes — poll get_page until they match."""
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, Any] = {"verified": False, "rows": []}
+    while time.monotonic() < deadline:
+        last = verify_column_counts(base_url, expected)
+        if last.get("verified"):
+            return last
+        time.sleep(interval_s)
+    return last
+
+
+def _poll_job_status(base_url: str, job_id: int) -> dict[str, Any]:
+    """VTS import is async — poll /data/job_status until the job finishes."""
+    deadline = time.monotonic() + VTS_JOB_POLL_TIMEOUT_S
+    last_detail: Any = None
+    polls = 0
+    while time.monotonic() < deadline:
+        polls += 1
+        url = job_status_url(base_url, job_id)
+        try:
+            response = requests.get(url, timeout=VTS_REQUEST_TIMEOUT_S)
+            last_detail = response.text
+            try:
+                last_detail = response.json()
+            except ValueError:
+                pass
+            if not response.ok:
+                return {
+                    "completed": False,
+                    "success": False,
+                    "jobId": job_id,
+                    "polls": polls,
+                    "detail": last_detail,
+                    "message": f"job_status HTTP {response.status_code}",
+                }
+            if _job_is_terminal(last_detail):
+                return {
+                    "completed": True,
+                    "success": _job_is_success(last_detail),
+                    "jobId": job_id,
+                    "polls": polls,
+                    "detail": last_detail,
+                    "message": "job completed" if _job_is_success(last_detail) else "job failed",
+                }
+        except requests.RequestException as exc:
+            return {
+                "completed": False,
+                "success": False,
+                "jobId": job_id,
+                "polls": polls,
+                "detail": str(exc),
+                "message": f"job_status request failed: {exc}",
+            }
+        time.sleep(VTS_JOB_POLL_INTERVAL_S)
+    return {
+        "completed": False,
+        "success": False,
+        "jobId": job_id,
+        "polls": polls,
+        "detail": last_detail,
+        "message": f"job_status poll timeout after {VTS_JOB_POLL_TIMEOUT_S:.0f}s",
+    }
+
+
 def import_csv_url(base_url: str, colname: str | None = None) -> str:
     root = f"{vts_api_root(base_url)}/data/import_csv"
     if colname:
@@ -127,24 +298,37 @@ def _post_import_file(
     file_path: Path,
     *,
     field_name: str,
+    upload_name: str | None = None,
 ) -> dict[str, Any]:
     url = import_csv_url(base_url, colname)
+    send_name = upload_name or file_path.name
+    mime = "text/csv" if send_name.lower().endswith(".csv") else "text/plain"
     with file_path.open("rb") as fh:
         response = requests.post(
             url,
-            files={field_name: (file_path.name, fh, "text/csv")},
+            files={field_name: (send_name, fh, mime)},
             timeout=VTS_REQUEST_TIMEOUT_S * 6,
         )
     ok, message, detail = _parse_import_response(response)
-    return {
+    result: dict[str, Any] = {
         "column": colname,
-        "file": file_path.name,
+        "file": send_name,
         "httpStatus": response.status_code,
         "success": ok,
         "message": message,
         "detail": detail,
-        "strategy": f"colname={colname or 'none'}, field={field_name}, header={'yes' if 'hdr' in file_path.name else 'no'}",
+        "strategy": f"colname={colname or 'none'}, field={field_name}, upload={send_name}",
     }
+    job_id = _extract_job_id(detail, response)
+    if job_id is not None:
+        result["jobId"] = job_id
+        poll = _poll_job_status(base_url, job_id)
+        result["jobPoll"] = poll
+        result["success"] = bool(poll.get("success"))
+        result["message"] = poll.get("message") or message
+        if not poll.get("success"):
+            result["detail"] = poll.get("detail") or detail
+    return result
 
 
 def _try_import_column(
@@ -161,20 +345,28 @@ def _try_import_column(
 
     attempts: list[dict[str, Any]] = []
     strategies = (
-        (True, "file"),
-        (False, "file"),
-        (True, "csv"),
-        (False, "csv"),
+        (True, "file", None),
+        (False, "file", None),
+        (True, "csv", None),
+        (False, "csv", None),
+        (True, "file", ".csv"),
+        (False, "file", ".csv"),
     )
-    for include_header, field_name in strategies:
+    for include_header, field_name, ext_override in strategies:
         tag = "hdr" if include_header else "plain"
-        path = work_dir / f"import_{colname}_{tag}_{field_name}.txt"
+        suffix = ext_override or ".txt"
+        path = work_dir / f"import_{colname}_{tag}_{field_name}{suffix}"
         _write_column_file(path, colname, values, include_header=include_header)
-        result = _post_import_file(base_url, colname, path, field_name=field_name)
-        check = verify_column_counts(base_url, {colname: expected_count})
+        upload_name = f"{colname}{suffix}" if ext_override else path.name
+        result = _post_import_file(
+            base_url, colname, path, field_name=field_name, upload_name=upload_name
+        )
+        time.sleep(1.0)
+        check = _wait_for_column_counts(base_url, {colname: expected_count})
         row = (check.get("rows") or [{}])[0]
         result["countCheck"] = row
         result["verified"] = bool(row.get("passed"))
+        result["countWait"] = check
         attempts.append(result)
         if result.get("verified"):
             result["success"] = True
@@ -250,6 +442,59 @@ def verify_column_counts(
     return {"verified": all_ok, "rows": rows, "countsPerColumn": counts}
 
 
+def _try_import_combined_file(
+    base_url: str,
+    source_path: Path,
+    columns: list[str],
+    expected: dict[str, int],
+) -> dict[str, Any] | None:
+    """Upload combined CSV (e.g. P_BAN,P_SUBSCRIBER) — matches manual VTS UI + job_status."""
+    attempts: list[dict[str, Any]] = []
+    colname_variants: list[str | None] = [None]
+    if columns:
+        colname_variants.append(columns[0])
+
+    for colname in colname_variants:
+        for field_name in ("file", "csv"):
+            for upload_name in (source_path.name, source_path.with_suffix(".csv").name):
+                result = _post_import_file(
+                    base_url,
+                    colname,
+                    source_path,
+                    field_name=field_name,
+                    upload_name=upload_name,
+                )
+                attempts.append(result)
+                time.sleep(1.0)
+                verify = _wait_for_column_counts(base_url, expected)
+                verified = bool(verify.get("verified"))
+                if verified:
+                    return {
+                        "mode": "combined",
+                        "success": True,
+                        "verified": True,
+                        "colname": colname,
+                        "field": field_name,
+                        "upload": result,
+                        "verification": verify,
+                        "attempts": attempts,
+                    }
+                if result.get("jobId") and result.get("success"):
+                    verify = _wait_for_column_counts(base_url, expected, timeout_s=90.0)
+                    if verify.get("verified"):
+                        return {
+                            "mode": "combined",
+                            "success": True,
+                            "verified": True,
+                            "colname": colname,
+                            "field": field_name,
+                            "upload": result,
+                            "verification": verify,
+                            "attempts": attempts,
+                        }
+    return None
+
+
 def import_columns(
     base_url: str,
     columns: list[str],
@@ -258,8 +503,7 @@ def import_columns(
     work_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
-    Import data into VTS — one column at a time via import_csv?colname=.
-    Verifies countsPerColumn after import; fails if counts stay at 0.
+    Import into VTS: combined CSV + job_status poll first; then per-column ?colname=.
     """
     path = Path(source_txt)
     if not path.is_file():
@@ -271,6 +515,24 @@ def import_columns(
         raise RuntimeError(f"No data rows found in {path.name}")
 
     wd = work_dir or path.parent
+    combined = None
+    if len(columns) > 1:
+        combined = _try_import_combined_file(base_url, path, columns, expected)
+
+    if combined:
+        return {
+            "success": True,
+            "verified": True,
+            "httpOk": True,
+            "columns": columns,
+            "expectedCounts": expected,
+            "mode": "combined",
+            "combinedResult": combined,
+            "verification": combined.get("verification"),
+            "file": path.name,
+            "message": "Import verified on VTS (combined file + job_status)",
+        }
+
     column_results: list[dict[str, Any]] = []
     for col in columns:
         values = col_values[col]
@@ -285,7 +547,8 @@ def import_columns(
 
     verified = all(r.get("verified") for r in column_results if r.get("column"))
     http_ok = all(r.get("success") for r in column_results)
-    verify = verify_column_counts(base_url, expected)
+    verify = _wait_for_column_counts(base_url, expected, timeout_s=30.0 if verified else 10.0)
+    verified = bool(verify.get("verified"))
 
     return {
         "success": http_ok and verified,
@@ -300,9 +563,9 @@ def import_columns(
             "Import verified on VTS"
             if verified
             else (
-                "HTTP import returned OK but VTS counts are still wrong (often need import_csv?colname=COLUMN)"
+                "VTS import job finished but column counts are still wrong — check job_status / file format"
                 if http_ok
-                else "VTS import HTTP/request failed"
+                else "VTS import HTTP/request or job_status failed"
             )
         ),
     }

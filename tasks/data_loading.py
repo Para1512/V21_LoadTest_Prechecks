@@ -47,7 +47,7 @@ def vts1_remediation_issues(
     issues: list[str] = []
     if precheck:
         failed = precheck.get("vts1", {}).get("failedColumns") or []
-        if "P_BAN" in failed:
+        if "P_BAN" in failed or "P_SUBSCRIBER" in failed:
             issues.append("ban_subscriber")
         if "P_SIM" in failed:
             issues.append("p_sim")
@@ -202,7 +202,6 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
             "precheck": precheck,
             "remediation": remediation_runs,
             "messages": messages,
-            "pBanReloadNeeded": p_ban_reload_needed(precheck=precheck),
             "queryDefaults": query_defaults(),
         }
 
@@ -227,7 +226,6 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
                 "prep": prep,
                 "remediation": remediation_runs,
                 "messages": messages,
-                "pBanReloadNeeded": p_ban_reload_needed(precheck=precheck, prep=prep),
                 "queryDefaults": query_defaults(),
             }
 
@@ -240,21 +238,6 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
         "messages": messages,
         "queryDefaults": query_defaults(),
     }
-
-
-def p_ban_reload_needed(
-    precheck: dict[str, Any] | None = None,
-    prep: dict[str, Any] | None = None,
-) -> bool:
-    if precheck:
-        failed = precheck.get("vts1", {}).get("failedColumns") or []
-        if "P_BAN" in failed or "P_SUBSCRIBER" in failed:
-            return True
-    if prep and not prep.get("validationPassed"):
-        for v in prep.get("validationDetails") or []:
-            if v.get("id") == "vts1-ban-subscriber" and not v.get("passed"):
-                return True
-    return False
 
 
 def _prep_validation_columns() -> tuple[list[str], list[str]]:
@@ -350,8 +333,7 @@ def run_vts_precheck() -> dict[str, Any]:
         )
     else:
         messages.append(
-            "Cannot continue until all failed columns meet minimum counts. "
-            "Plan data load/import for failed columns in a follow-up step."
+            "Pre-check failed — RUN will auto-clear, query Oracle, and import into VTS 1 where applicable."
         )
 
     return {
@@ -362,9 +344,6 @@ def run_vts_precheck() -> dict[str, Any]:
         "passedColumns": all_passed,
         "failedColumns": all_failed,
         "canProceed": can_proceed,
-        "pBanReloadNeeded": p_ban_reload_needed(precheck={
-            "vts1": vts1_result,
-        }),
         "queryDefaults": query_defaults(),
         "messages": messages,
     }
@@ -469,7 +448,6 @@ def run_vts_prep() -> dict[str, Any]:
             "messages": messages,
             "prepCompleted": False,
         }
-        fail_prep["pBanReloadNeeded"] = p_ban_reload_needed(prep=fail_prep)
         fail_prep["queryDefaults"] = query_defaults()
         return fail_prep
 

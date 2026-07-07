@@ -587,6 +587,32 @@ function renderVtsRemediationSection(remediationRuns) {
         msg.textContent = r.message;
         block.appendChild(msg);
       }
+      const imp = r.import;
+      if (imp?.combinedResult?.upload?.jobId) {
+        const job = document.createElement("p");
+        job.className = "data-loading-vts-meta";
+        job.textContent = `VTS import job ${imp.combinedResult.upload.jobId} (job_status polled)`;
+        block.appendChild(job);
+      } else if (imp?.columnResults?.length) {
+        imp.columnResults.forEach((cr) => {
+          const attempts = cr.attempts || [cr];
+          const last = attempts[attempts.length - 1];
+          if (last?.jobId) {
+            const job = document.createElement("p");
+            job.className = "data-loading-vts-meta";
+            job.textContent = `${cr.column || "column"}: import job ${last.jobId}`;
+            block.appendChild(job);
+          }
+        });
+      }
+      if (imp?.verification?.rows?.length) {
+        imp.verification.rows.forEach((row) => {
+          const v = document.createElement("p");
+          v.className = row.passed ? "data-loading-vts-safe" : "data-loading-vts-unsafe";
+          v.textContent = `${row.column}: expected ${row.expected}, actual ${row.actual ?? "missing"}`;
+          block.appendChild(v);
+        });
+      }
       wrap.appendChild(block);
     });
   });
@@ -639,69 +665,6 @@ function renderVtsClearSection(clearDetails) {
   return wrap;
 }
 
-function task1PBanReloadNeeded(od) {
-  if (!od) return false;
-  if (od.pBanReloadNeeded) return true;
-  if (od.precheck?.pBanReloadNeeded) return true;
-  if (od.prep?.pBanReloadNeeded) return true;
-  return false;
-}
-
-function readQueryParamsFromForm(root) {
-  return {
-    skuLike: root.querySelector('[name="task1-sku"]')?.value?.trim() ?? "",
-    memoHavingCount: parseInt(String(root.querySelector('[name="task1-memo"]')?.value || ""), 10),
-    soc: root.querySelector('[name="task1-soc"]')?.value?.trim() ?? "",
-    sysCreationDate: root.querySelector('[name="task1-dt"]')?.value?.trim() ?? ""
-  };
-}
-
-function renderQueryEditForm(qd, reloadResult) {
-  const wrap = document.createElement("div");
-  wrap.className = "data-loading-vts-block data-loading-query-form";
-  const h = document.createElement("div");
-  h.className = "disk-header";
-  h.textContent = "Query parameters (edit before extract)";
-  wrap.appendChild(h);
-  const p = qd?.defaults || qd || {};
-  const addField = (labelText, name, type, val) => {
-    const lb = document.createElement("label");
-    lb.textContent = labelText;
-    wrap.appendChild(lb);
-    const inp = document.createElement("input");
-    inp.type = type;
-    inp.name = name;
-    inp.className = "data-loading-input";
-    inp.value = val != null ? String(val) : "";
-    wrap.appendChild(inp);
-  };
-  addField("SKU contains (e.g. IP14128STR)", "task1-sku", "text", p.skuLike || "IP14128STR");
-  addField("Memo group HAVING count", "task1-memo", "number", p.memoHavingCount ?? 13);
-  addField("SOC", "task1-soc", "text", p.soc || "WBRM422BG");
-  addField("sys_creation_date >= (YYYY-MM-DD HH24:MI:SS)", "task1-dt", "text", p.sysCreationDate || "2026-01-20 00:00:01");
-  const sqlLabel = document.createElement("div");
-  sqlLabel.className = "log-space-pro-subtitle";
-  sqlLabel.textContent = "SQL preview (main extract)";
-  wrap.appendChild(sqlLabel);
-  const pre = document.createElement("pre");
-  pre.className = "task-output data-loading-sql";
-  pre.textContent = qd?.displaySql || reloadResult?.displaySql || "";
-  wrap.appendChild(pre);
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "primary";
-  btn.textContent = "Clear P_BAN/P_SUBSCRIBER & extract to TXT";
-  btn.setAttribute("data-task1", "p-ban-reload");
-  wrap.appendChild(btn);
-  if (reloadResult?.txtFile) {
-    const ok = document.createElement("p");
-    ok.className = "data-loading-vts-safe";
-    ok.textContent = `Extracted ${reloadResult.rowCount ?? "?"} rows → ${reloadResult.txtFile}`;
-    wrap.appendChild(ok);
-  }
-  return wrap;
-}
-
 function renderDataLoadingVts(od) {
   const root = document.createElement("div");
   root.className = "task-output data-loading-vts";
@@ -719,11 +682,9 @@ function renderDataLoadingVts(od) {
     intro.textContent = prep.message || od.message || "VTS prep failed.";
   } else if (od.phase === "remediating") {
     intro.textContent = "VTS 1 validation failed — running Oracle extract and VTS import…";
-  } else if (od.phase === "p-ban-reload-done") {
-    intro.textContent = od.pBanReload?.message || "P_BAN reload completed.";
-  } else if (task1PBanReloadNeeded(od)) {
+  } else if (od.phase === "insufficient" || (od.phase === "error" && od.remediation?.length)) {
     intro.textContent =
-      "P_BAN / P_SUBSCRIBER below limit or not aligned. Edit query below, then extract to TXT file.";
+      "Auto remediation ran but VTS 1 still failed. Review remediation details below, adjust SQL via Oracle Queries, then RUN Task 1 again.";
   } else if (od.precheck && !od.precheck.canProceed) {
     intro.textContent =
       "Pre-check failed. Review details below.";
@@ -780,15 +741,6 @@ function renderDataLoadingVts(od) {
     done.className = "data-loading-vts-safe";
     done.textContent = "Old test data has been removed — VTS prep completed.";
     root.appendChild(done);
-  }
-
-  if (task1PBanReloadNeeded(od) || od.pBanReload) {
-    const qd = od.queryDefaults || od.precheck?.queryDefaults || od.prep?.queryDefaults;
-    root.appendChild(renderQueryEditForm(qd, od.pBanReload));
-  }
-
-  if (od.pBanReload?.clearDetails?.length) {
-    root.appendChild(renderVtsClearSection(od.pBanReload.clearDetails));
   }
 
   const logLines =
@@ -1577,76 +1529,16 @@ function applyTask1FlowResult(flow) {
     skipped: false,
     output,
     outputType: "data-loading-vts",
-    outputData: {
-      phase,
-      precheck: flow.precheck,
-      prep: flow.prep,
-      remediation: flow.remediation || [],
-      pBanReloadNeeded: flow.pBanReloadNeeded,
-      queryDefaults: flow.queryDefaults,
-      messages: flow.messages || []
-    },
+      outputData: {
+        phase,
+        precheck: flow.precheck,
+        prep: flow.prep,
+        remediation: flow.remediation || [],
+        queryDefaults: flow.queryDefaults,
+        messages: flow.messages || []
+      },
     expanded: true
   });
-}
-
-async function runTask1PBanReload(btn) {
-  const wiz = btn.closest(".data-loading-query-form");
-  const t = tasks.find((x) => x.id === 1);
-  if (!t) return;
-  const params = wiz ? readQueryParamsFromForm(wiz) : {};
-  if (!Number.isFinite(params.memoHavingCount)) {
-    params.memoHavingCount = 12;
-  }
-  updateTask(1, {
-    status: "Running",
-    outputData: { ...t.outputData, phase: "p-ban-reloading" },
-    expanded: true
-  });
-  try {
-    const res = await fetch(apiUrl("/api/tasks/data-loading/p-ban-reload"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
-    });
-    const pBanReload = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(pBanReload.message || `Extract failed (HTTP ${res.status})`);
-    }
-    const prev = t.outputData || {};
-    const allMessages = [
-      ...(prev.messages || []),
-      ...(pBanReload.messages || [])
-    ];
-    updateTask(1, {
-      status: "Completed",
-      skipped: false,
-      output: pBanReload.message || "Extract completed.",
-      outputType: "data-loading-vts",
-      outputData: {
-        ...prev,
-        phase: "p-ban-reload-done",
-        pBanReload,
-        pBanReloadNeeded: true,
-        messages: allMessages
-      },
-      expanded: true
-    });
-  } catch (err) {
-    updateTask(1, {
-      status: "Completed",
-      skipped: false,
-      output: `Extract failed: ${formatFetchFailureMessage(err)}`,
-      outputType: "data-loading-vts",
-      outputData: {
-        ...t.outputData,
-        phase: "error",
-        message: formatFetchFailureMessage(err),
-        pBanReloadNeeded: true
-      },
-      expanded: true
-    });
-  }
 }
 
 async function runTask1OracleTest() {
@@ -1936,11 +1828,5 @@ hupEmailButton.addEventListener("click", () =>
 crmEmailButton.addEventListener("click", () =>
   triggerEmail(crmEmailButton, "/api/email/crm-igw-bounce", "CRM IGW Bounce")
 );
-
-tasksRoot.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-task1='p-ban-reload']");
-  if (!btn) return;
-  void runTask1PBanReload(btn);
-});
 
 renderTasks();
