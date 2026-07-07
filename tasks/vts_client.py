@@ -27,6 +27,7 @@ VTS1_MIN_COUNTS: dict[str, int] = {
 VTS2_MIN_COUNTS: dict[str, int] = {
     "P_BAN_C": 1000,
     "P_BAN_H": 1000,
+    "P_SIM": 5000,
 }
 
 VTS1_ALIGN_COLUMNS = ("P_BAN", "P_SUBSCRIBER")

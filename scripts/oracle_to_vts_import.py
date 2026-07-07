@@ -58,6 +58,29 @@ def main() -> int:
         _print_result(imp)
         return 0 if imp.get("verified") else 1
 
+    if args.query == "p_sim":
+        meta = oq.QUERY_META["p_sim"]
+        sql = oq.load_queries().get("p_sim", "").strip()
+        if not sql:
+            print("No SQL for p_sim")
+            return 1
+        if args.clear:
+            for url, label in (
+                (os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2244/"), "VTS 1"),
+                (os.environ.get("VTS2_URL", "http://vm0196ptlrg001:2245/"), "VTS 2"),
+            ):
+                vts.clear_column(url.strip(), "P_SIM")
+                print(f"Cleared P_SIM on {label}")
+        from tasks import data_loading as dl
+
+        proj = ROOT
+        out_dir = proj / "exports" / "cli_p_sim_import"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        entry = dl._remediate_p_sim_dual(sql, out_dir, proj, messages := [])
+        for line in messages:
+            print(line)
+        return 0 if entry.get("success") else 1
+
     meta = oq.QUERY_META[args.query]
     sql = oq.load_queries().get(args.query, "").strip()
     if not sql:

@@ -40,29 +40,153 @@ def save_oracle_queries(updates: dict[str, str]) -> dict[str, Any]:
     return {"success": True, "queries": merged, "meta": oq.queries_for_api()["meta"]}
 
 
-def vts1_remediation_issues(
+def remediation_issues(
     precheck: dict[str, Any] | None = None,
     prep: dict[str, Any] | None = None,
 ) -> list[str]:
     issues: list[str] = []
     if precheck:
-        failed = precheck.get("vts1", {}).get("failedColumns") or []
-        if "P_BAN" in failed or "P_SUBSCRIBER" in failed:
+        vts1_failed = precheck.get("vts1", {}).get("failedColumns") or []
+        vts2_failed = precheck.get("vts2", {}).get("failedColumns") or []
+        if "P_BAN" in vts1_failed or "P_SUBSCRIBER" in vts1_failed:
             issues.append("ban_subscriber")
-        if "P_SIM" in failed:
+        if "P_SIM" in vts1_failed or "P_SIM" in vts2_failed:
             issues.append("p_sim")
-        if "P_IMEI_IP14128PUR" in failed:
+        if "P_IMEI_IP14128PUR" in vts1_failed:
             issues.append("p_imei_ip14128pur")
     if prep:
         for v in prep.get("validationDetails") or []:
             if not v.get("passed"):
                 if v.get("id") == "vts1-ban-subscriber" and "ban_subscriber" not in issues:
                     issues.append("ban_subscriber")
-                elif v.get("id") == "vts1-p_sim" and "p_sim" not in issues:
+                elif v.get("id") in ("vts1-p_sim", "vts2-p_sim") and "p_sim" not in issues:
                     issues.append("p_sim")
                 elif v.get("id") == "vts1-p_imei_ip14128pur" and "p_imei_ip14128pur" not in issues:
                     issues.append("p_imei_ip14128pur")
     return issues
+
+
+vts1_remediation_issues = remediation_issues
+
+
+def _import_vts_data(
+    base_url: str,
+    vts_label: str,
+    headers: list[str],
+    vts_rows: list[tuple[str, ...]],
+    txt_path: Path,
+    filename: str,
+    messages: list[str],
+) -> dict[str, Any]:
+    """POST /data/import_csv (fileToUpload) with Oracle rows; fall back to saved TXT."""
+    messages.append(f"  Importing into {vts_label} (POST /data/import_csv) …")
+    imp = vts.import_oracle_rows(base_url, headers, vts_rows, filename=filename)
+    if not imp.get("verified"):
+        messages.append(f"  Direct import failed on {vts_label} — retrying from TXT …")
+        imp = vts.import_csv_file(base_url, txt_path, headers)
+    return imp
+
+
+def _remediate_p_sim_dual(
+    sql: str,
+    out_dir: Path,
+    proj: Path,
+    messages: list[str],
+) -> dict[str, Any]:
+    """Validation 2: clear P_SIM on VTS1+VTS2, query Oracle, split 10k/40k, import both."""
+    entry: dict[str, Any] = {
+        "issue": "p_sim",
+        "label": oq.QUERY_META["p_sim"]["label"],
+        "success": False,
+        "clearDetails": [],
+        "txtFile": None,
+        "rowCount": 0,
+        "import": None,
+        "imports": [],
+    }
+    headers = ["P_SIM"]
+
+    for url, label in ((VTS1_URL, "VTS 1"), (VTS2_URL, "VTS 2")):
+        vts.clear_column(url, "P_SIM")
+        entry["clearDetails"].append({"vts": label, "column": "P_SIM", "success": True})
+        messages.append(f"  Cleared {label} — P_SIM: Passed")
+
+    messages.append("  Running Oracle P_SIM query …")
+    rows, _cols = oq.run_sql(sql)
+    messages.append(f"  Query returned {len(rows)} row(s).")
+    if not rows:
+        entry["message"] = "Oracle P_SIM query returned no rows."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    vts2_rows_raw, vts1_rows_raw = oq.split_p_sim_rows(rows)
+    if not vts2_rows_raw:
+        entry["message"] = "Not enough rows for VTS 2 (need at least 1; target 10,000)."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+    if not vts1_rows_raw:
+        entry["message"] = "Not enough rows for VTS 1 (need rows 10,001+; target 40,000)."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    vts2_path = out_dir / "P_SIM_VTS2.txt"
+    vts1_path = out_dir / "P_SIM_VTS1.txt"
+    vts2_count = oq.write_p_sim_column_txt(vts2_path, vts2_rows_raw)
+    vts1_count = oq.write_p_sim_column_txt(vts1_path, vts1_rows_raw)
+    entry["txtFile"] = f"{vts2_path.name}, {vts1_path.name}"
+    entry["rowCount"] = vts2_count + vts1_count
+    messages.append(
+        f"  Wrote {vts2_path.name} ({vts2_count} rows) and "
+        f"{vts1_path.name} ({vts1_count} rows)."
+    )
+
+    _, vts2_import_rows = oq.rows_for_vts_import("p_sim", vts2_rows_raw)
+    _, vts1_import_rows = oq.rows_for_vts_import("p_sim", vts1_rows_raw)
+
+    imp2 = _import_vts_data(
+        VTS2_URL, "VTS 2", headers, vts2_import_rows, vts2_path, vts2_path.name, messages
+    )
+    imp1 = _import_vts_data(
+        VTS1_URL, "VTS 1", headers, vts1_import_rows, vts1_path, vts1_path.name, messages
+    )
+    entry["imports"] = [
+        {
+            "vts": "VTS 2",
+            "txtFile": str(vts2_path.relative_to(proj)),
+            "rowCount": vts2_count,
+            "import": imp2,
+        },
+        {
+            "vts": "VTS 1",
+            "txtFile": str(vts1_path.relative_to(proj)),
+            "rowCount": vts1_count,
+            "import": imp1,
+        },
+    ]
+    entry["import"] = {"vts1": imp1, "vts2": imp2}
+
+    ok2 = bool(imp2.get("verified"))
+    ok1 = bool(imp1.get("verified"))
+    if ok2 and ok1:
+        entry["success"] = True
+        entry["message"] = (
+            f"Imported P_SIM — VTS 2: {vts2_count} rows, VTS 1: {vts1_count} rows."
+        )
+        messages.append(f"  {entry['message']}")
+        return entry
+
+    entry["message"] = "P_SIM import failed on one or both VTS instances."
+    messages.append(f"  FAILED — {entry['message']}")
+    for imp, label, count in ((imp2, "VTS 2", vts2_count), (imp1, "VTS 1", vts1_count)):
+        if imp.get("verified"):
+            continue
+        messages.append(f"    {label}: {imp.get('message') or 'import failed'}")
+        for row in (imp.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"      {row.get('column')}: expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+    return entry
 
 
 def run_vts1_remediation(
@@ -89,16 +213,43 @@ def run_vts1_remediation(
 
     proj = Path(__file__).resolve().parent.parent
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    out_dir = proj / "exports" / f"vts1_remediate_{stamp}"
+    out_dir = proj / "exports" / f"vts_remediate_{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    messages.append("=== VTS 1 remediation (Oracle → TXT → VTS import) ===")
+    messages.append("=== VTS remediation (Oracle → TXT → import) ===")
 
     for issue_key in issue_list:
         meta = oq.QUERY_META.get(issue_key)
         if not meta:
             continue
         sql = queries.get(issue_key, "").strip()
+
+        if issue_key == "p_sim":
+            messages.append(f"--- {meta['label']} ---")
+            if not sql:
+                results.append(
+                    {
+                        "issue": issue_key,
+                        "label": meta["label"],
+                        "success": False,
+                        "message": "SQL query is empty.",
+                    }
+                )
+                messages.append("  FAILED — SQL query is empty.")
+                continue
+            try:
+                entry = _remediate_p_sim_dual(sql, out_dir, proj, messages)
+            except Exception as exc:
+                entry = {
+                    "issue": issue_key,
+                    "label": meta["label"],
+                    "success": False,
+                    "message": str(exc),
+                }
+                messages.append(f"  FAILED — {exc}")
+            results.append(entry)
+            continue
+
         entry: dict[str, Any] = {
             "issue": issue_key,
             "label": meta["label"],
@@ -139,16 +290,15 @@ def run_vts1_remediation(
             messages.append(f"  Wrote {meta['txtFile']} ({row_count} data rows + header).")
 
             headers, vts_rows = oq.rows_for_vts_import(issue_key, rows)
-            messages.append("  Importing into VTS 1 (single file POST /data/import_csv) …")
-            imp = vts.import_oracle_rows(
+            imp = _import_vts_data(
                 VTS1_URL,
+                "VTS 1",
                 headers,
                 vts_rows,
-                filename=meta["txtFile"],
+                txt_path,
+                meta["txtFile"],
+                messages,
             )
-            if not imp.get("verified"):
-                messages.append("  Direct import failed — retrying from saved TXT file …")
-                imp = vts.import_txt(VTS1_URL, txt_path, columns=meta["clearColumns"])
             entry["import"] = imp
             if not imp.get("verified"):
                 entry["message"] = imp.get("message") or "VTS import failed verification."
@@ -183,7 +333,7 @@ def run_vts1_remediation(
     return {
         "success": all_ok,
         "type": "data-loading-vts1-remediation",
-        "message": "VTS 1 remediation completed." if all_ok else "VTS 1 remediation had failures.",
+        "message": "VTS remediation completed." if all_ok else "VTS remediation had failures.",
         "results": results,
         "exportDir": str(out_dir.relative_to(proj)),
         "messages": messages,
@@ -199,7 +349,7 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
     precheck = run_vts_precheck()
     messages.extend(precheck.get("messages") or [])
 
-    issues = vts1_remediation_issues(precheck=precheck)
+    issues = remediation_issues(precheck=precheck)
     if issues:
         rem = run_vts1_remediation(issues, query_overrides=query_overrides)
         remediation_runs.append(rem)
@@ -222,7 +372,7 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
     messages.extend(prep.get("messages") or [])
 
     if not prep.get("success"):
-        issues = vts1_remediation_issues(prep=prep)
+        issues = remediation_issues(prep=prep)
         if issues:
             rem = run_vts1_remediation(issues, query_overrides=query_overrides)
             remediation_runs.append(rem)
@@ -255,7 +405,11 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
 
 def _prep_validation_columns() -> tuple[list[str], list[str]]:
     vts1_cols = list(vts.VTS1_ALIGN_COLUMNS) + ["P_SIM", "P_IMEI_IP14128PUR"]
-    vts2_cols = list(vts.VTS2_ALIGN_GROUP_C) + list(vts.VTS2_ALIGN_GROUP_H) + ["P_NEW_IMEI"]
+    vts2_cols = (
+        list(vts.VTS2_ALIGN_GROUP_C)
+        + list(vts.VTS2_ALIGN_GROUP_H)
+        + ["P_NEW_IMEI", "P_SIM"]
+    )
     return vts1_cols, vts2_cols
 
 
@@ -318,6 +472,10 @@ def run_vts_precheck() -> dict[str, Any]:
     messages.extend(vts1_result["messages"])
 
     messages.append("Checking VTS 2 …")
+    vts2_rules = ", ".join(
+        f"{col} >= {req}" for col, req in vts.VTS2_MIN_COUNTS.items()
+    )
+    messages.append(f"  VTS 2 pre-check rules: {vts2_rules}")
     vts2_payload = vts.fetch_get_page(VTS2_URL)
     vts2_counts = vts2_payload["countsPerColumn"]
     vts2_result = vts.check_min_counts(
@@ -346,7 +504,7 @@ def run_vts_precheck() -> dict[str, Any]:
         )
     else:
         messages.append(
-            "Pre-check failed — RUN will auto-clear, query Oracle, and import into VTS 1 where applicable."
+            "Pre-check failed — RUN will auto-clear, query Oracle, and import into VTS where applicable."
         )
 
     return {
@@ -413,6 +571,16 @@ def run_vts_prep() -> dict[str, Any]:
         validation_details.append(min_entry)
         messages.append(min_entry["message"])
 
+    vts2_p_sim = _min_count_validation_entry(
+        vts2_counts,
+        "P_SIM",
+        vts.VTS2_MIN_COUNTS["P_SIM"],
+        id="vts2-p_sim",
+        name=f"VTS 2 — P_SIM >= {vts.VTS2_MIN_COUNTS['P_SIM']}",
+    )
+    validation_details.append(vts2_p_sim)
+    messages.append(vts2_p_sim["message"])
+
     vts2_align_c = vts.check_columns_equal(
         vts2_counts, vts.VTS2_ALIGN_GROUP_C, label="VTS 2 (current)"
     )
@@ -467,7 +635,7 @@ def run_vts_prep() -> dict[str, Any]:
     if not v1_entry["passed"]:
         return _prep_fail("P_BAN & P_SUBSCRIBER data is not aligned.")
     for v in validation_details:
-        if v["id"] in ("vts1-p_sim", "vts1-p_imei_ip14128pur") and not v["passed"]:
+        if v["id"] in ("vts1-p_sim", "vts2-p_sim", "vts1-p_imei_ip14128pur") and not v["passed"]:
             return _prep_fail(v["message"])
     if not v2c_entry["passed"] or not v2h_entry["passed"]:
         detail = []

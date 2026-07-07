@@ -16,8 +16,12 @@ DEFAULT_P_SIM_SQL = (
     "SELECT serial_number FROM serial_item_inv "
     "WHERE curr_possession = 'A' AND Item_ownership = 'C' "
     "AND Eq_type = 'G' AND serial_number LIKE '89302720%' "
-    "AND item_id = 'SIM401' AND rownum <= 10000"
+    "AND item_id = 'SIM401' AND rownum <= 50000"
 )
+
+P_SIM_VTS2_ROW_LIMIT = 10000
+P_SIM_VTS1_ROW_LIMIT = 40000
+P_SIM_QUERY_ROW_LIMIT = 50000
 
 DEFAULT_P_IMEI_SQL = (
     "SELECT /*+ PARALLEL*/ REPLACE(d.ESN_IMEI, ' ', ') AS IMEI, "
@@ -45,10 +49,15 @@ QUERY_META: dict[str, dict[str, Any]] = {
     },
     "p_sim": {
         "id": "p_sim",
-        "label": "VTS 1 — P_SIM",
+        "label": "VTS 1 & VTS 2 — P_SIM",
         "clearColumns": ["P_SIM"],
         "txtFile": "P_SIM.txt",
         "headers": ["P_SIM"],
+        "dualVts": True,
+        "vts2TxtFile": "P_SIM_VTS2.txt",
+        "vts1TxtFile": "P_SIM_VTS1.txt",
+        "vts2RowLimit": P_SIM_VTS2_ROW_LIMIT,
+        "vts1RowLimit": P_SIM_VTS1_ROW_LIMIT,
     },
     "p_imei_ip14128pur": {
         "id": "p_imei_ip14128pur",
@@ -135,6 +144,26 @@ def run_sql(sql: str) -> tuple[list[tuple[Any, ...]], list[str]]:
             return rows, columns
     finally:
         conn.close()
+
+
+def split_p_sim_rows(
+    rows: list[tuple[Any, ...]],
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """First 10k rows → VTS 2; next 40k → VTS 1."""
+    vts2 = rows[:P_SIM_VTS2_ROW_LIMIT]
+    vts1 = rows[P_SIM_VTS2_ROW_LIMIT : P_SIM_VTS2_ROW_LIMIT + P_SIM_VTS1_ROW_LIMIT]
+    return vts2, vts1
+
+
+def write_p_sim_column_txt(path: Path, rows: list[tuple[Any, ...]]) -> int:
+    """Write single-column P_SIM file (header + CRLF rows)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["P_SIM"]
+    for row in rows:
+        lines.append(str(row[0] if row else "").strip())
+    text = "\r\n".join(lines) + "\r\n"
+    path.write_bytes(text.encode("utf-8"))
+    return max(0, len(lines) - 1)
 
 
 def rows_for_vts_import(

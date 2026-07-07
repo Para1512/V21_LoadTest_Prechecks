@@ -562,7 +562,7 @@ function renderVtsRemediationSection(remediationRuns) {
   wrap.className = "data-loading-vts-block";
   const h = document.createElement("div");
   h.className = "disk-header";
-  h.textContent = "VTS 1 remediation (Oracle → TXT → import)";
+  h.textContent = "VTS remediation (Oracle → TXT → import)";
   wrap.appendChild(h);
   const runs = Array.isArray(remediationRuns) ? remediationRuns : [remediationRuns];
   runs.forEach((run) => {
@@ -586,6 +586,18 @@ function renderVtsRemediationSection(remediationRuns) {
         msg.className = "data-loading-vts-meta";
         msg.textContent = r.message;
         block.appendChild(msg);
+      }
+      if (r.imports?.length) {
+        r.imports.forEach((slot) => {
+          const line = document.createElement("p");
+          line.className = "data-loading-vts-meta";
+          const impSlot = slot.import || {};
+          const up = impSlot.upload || {};
+          line.textContent = `${slot.vts}: ${slot.rowCount ?? "?"} rows → ${slot.txtFile || ""}${
+            up.strategy ? ` (${up.strategy})` : ""
+          }`;
+          block.appendChild(line);
+        });
       }
       const imp = r.import;
       const upload = imp?.upload || imp?.combinedResult?.upload || {};
