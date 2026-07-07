@@ -11,8 +11,11 @@ from urllib.parse import quote
 import requests
 
 VTS_REQUEST_TIMEOUT_S = 45
-VTS_JOB_POLL_INTERVAL_S = 2.0
-VTS_JOB_POLL_TIMEOUT_S = 300.0
+VTS_IMPORT_TIMEOUT_S = 120
+VTS_JOB_POLL_INTERVAL_S = 0.2
+VTS_JOB_POLL_TIMEOUT_S = 15.0
+VTS_COUNT_VERIFY_TIMEOUT_S = 4.0
+VTS_COUNT_VERIFY_INTERVAL_S = 0.2
 
 VTS1_MIN_COUNTS: dict[str, int] = {
     "P_BAN": 8000,
@@ -180,10 +183,10 @@ def _wait_for_column_counts(
     base_url: str,
     expected: dict[str, int],
     *,
-    timeout_s: float = 45.0,
-    interval_s: float = 2.0,
+    timeout_s: float = VTS_COUNT_VERIFY_TIMEOUT_S,
+    interval_s: float = VTS_COUNT_VERIFY_INTERVAL_S,
 ) -> dict[str, Any]:
-    """VTS counts can lag after job_status completes — poll get_page until they match."""
+    """VTS counts can lag briefly after import — short poll on get_page."""
     deadline = time.monotonic() + timeout_s
     last: dict[str, Any] = {"verified": False, "rows": []}
     while time.monotonic() < deadline:
@@ -195,7 +198,7 @@ def _wait_for_column_counts(
 
 
 def _poll_job_status(base_url: str, job_id: int) -> dict[str, Any]:
-    """VTS import is async — poll /data/job_status until the job finishes."""
+    """VTS import is async — poll /data/job_status until the job finishes (usually <1s)."""
     deadline = time.monotonic() + VTS_JOB_POLL_TIMEOUT_S
     last_detail: Any = None
     polls = 0
@@ -239,11 +242,12 @@ def _poll_job_status(base_url: str, job_id: int) -> dict[str, Any]:
         time.sleep(VTS_JOB_POLL_INTERVAL_S)
     return {
         "completed": False,
-        "success": False,
+        "success": None,
+        "inconclusive": True,
         "jobId": job_id,
         "polls": polls,
         "detail": last_detail,
-        "message": f"job_status poll timeout after {VTS_JOB_POLL_TIMEOUT_S:.0f}s",
+        "message": f"job_status not conclusive after {VTS_JOB_POLL_TIMEOUT_S:.0f}s — verifying counts",
     }
 
 
@@ -307,7 +311,7 @@ def _post_import_file(
         response = requests.post(
             url,
             files={field_name: (send_name, fh, mime)},
-            timeout=VTS_REQUEST_TIMEOUT_S * 6,
+            timeout=VTS_IMPORT_TIMEOUT_S,
         )
     ok, message, detail = _parse_import_response(response)
     result: dict[str, Any] = {
@@ -325,10 +329,41 @@ def _post_import_file(
         result["jobId"] = job_id
         poll = _poll_job_status(base_url, job_id)
         result["jobPoll"] = poll
-        result["success"] = bool(poll.get("success"))
-        result["message"] = poll.get("message") or message
-        if not poll.get("success"):
-            result["detail"] = poll.get("detail") or detail
+        if poll.get("completed"):
+            result["success"] = bool(poll.get("success"))
+            result["message"] = poll.get("message") or message
+            if not poll.get("success"):
+                result["detail"] = poll.get("detail") or detail
+        elif poll.get("inconclusive"):
+            # Import may still have succeeded — let count verification decide.
+            result["success"] = ok
+            result["message"] = poll.get("message") or message
+    return result
+
+
+def _import_attempt(
+    base_url: str,
+    file_path: Path,
+    expected: dict[str, int],
+    *,
+    colname: str | None = None,
+    field_name: str = "file",
+    upload_name: str | None = None,
+) -> dict[str, Any]:
+    """Single POST import_csv + short count verification (fast path)."""
+    result = _post_import_file(
+        base_url,
+        colname,
+        file_path,
+        field_name=field_name,
+        upload_name=upload_name,
+    )
+    verify = _wait_for_column_counts(base_url, expected)
+    result["verification"] = verify
+    result["verified"] = bool(verify.get("verified"))
+    if result["verified"]:
+        result["success"] = True
+        result["message"] = "Import verified on VTS"
     return result
 
 
@@ -340,45 +375,38 @@ def _try_import_column(
     *,
     expected_count: int,
 ) -> dict[str, Any]:
-    """Try several import_csv shapes; VTS usually needs ?colname= and one value per line."""
+    """Import one column — fast path first, fallbacks only if needed."""
     if not values:
         return {"success": False, "message": "No values to import", "column": colname}
 
+    expected = {colname: expected_count}
     attempts: list[dict[str, Any]] = []
-    # Manual VTS: POST /data/import_csv with single-column file (header = colname).
-    strategies: list[tuple[bool, str | None, str | None]] = [
-        (True, None, None),
-        (False, None, None),
-        (True, colname, None),
-        (False, colname, None),
-        (True, colname, ".csv"),
-        (False, colname, ".csv"),
+    path_hdr = work_dir / f"import_{colname}_hdr.txt"
+    _write_column_file(path_hdr, colname, values, include_header=True)
+
+    fast_strategies: list[tuple[str | None, Path, str, str | None]] = [
+        (None, path_hdr, "file", path_hdr.name),
     ]
-    for include_header, col_param, ext_override in strategies:
-        tag = "hdr" if include_header else "plain"
-        suffix = ext_override or ".txt"
-        path = work_dir / f"import_{colname}_{tag}{suffix}"
-        _write_column_file(path, colname, values, include_header=include_header)
-        upload_name = f"{colname}{suffix}" if ext_override else path.name
-        for field_name in ("file", "csv"):
-            result = _post_import_file(
-                base_url,
-                col_param,
-                path,
-                field_name=field_name,
-                upload_name=upload_name,
-            )
-            time.sleep(1.0)
-            check = _wait_for_column_counts(base_url, {colname: expected_count})
-            row = (check.get("rows") or [{}])[0]
-            result["countCheck"] = row
-            result["verified"] = bool(row.get("passed"))
-            result["countWait"] = check
-            attempts.append(result)
-            if result.get("verified"):
-                result["success"] = True
-                result["attempts"] = attempts
-                return result
+    fallback_strategies: list[tuple[str | None, Path, str, str | None]] = [
+        (None, path_hdr, "csv", path_hdr.name),
+        (colname, path_hdr, "file", path_hdr.name),
+        (colname, path_hdr, "csv", path_hdr.name),
+    ]
+
+    for col_param, path, field_name, upload_name in fast_strategies + fallback_strategies:
+        result = _import_attempt(
+            base_url,
+            path,
+            expected,
+            colname=col_param,
+            field_name=field_name,
+            upload_name=upload_name,
+        )
+        result["column"] = colname
+        attempts.append(result)
+        if result.get("verified"):
+            result["attempts"] = attempts
+            return result
 
     return {
         "success": False,
@@ -460,47 +488,38 @@ def _try_import_combined_file(
 ) -> dict[str, Any] | None:
     """
     Manual VTS UI: POST {VTS1}/data/import_csv (no colname) with combined CSV file,
-    then poll /data/job_status?jobid=N.
+    then poll /data/job_status?jobid=N. Fast path matches manual (~1s).
     """
     attempts: list[dict[str, Any]] = []
     import_url = import_csv_url(base_url, None)
 
-    for field_name in ("file", "csv", "upload"):
-        for upload_name in (source_path.name, source_path.with_suffix(".csv").name):
-            result = _post_import_file(
-                base_url,
-                None,
-                source_path,
-                field_name=field_name,
-                upload_name=upload_name,
-            )
-            attempts.append(result)
-            time.sleep(1.0)
-            verify = _wait_for_column_counts(base_url, expected)
-            if verify.get("verified"):
-                return {
-                    "mode": "combined",
-                    "success": True,
-                    "verified": True,
-                    "importUrl": import_url,
-                    "field": field_name,
-                    "upload": result,
-                    "verification": verify,
-                    "attempts": attempts,
-                }
-            if result.get("jobId") and result.get("success"):
-                verify = _wait_for_column_counts(base_url, expected, timeout_s=90.0)
-                if verify.get("verified"):
-                    return {
-                        "mode": "combined",
-                        "success": True,
-                        "verified": True,
-                        "importUrl": import_url,
-                        "field": field_name,
-                        "upload": result,
-                        "verification": verify,
-                        "attempts": attempts,
-                    }
+    strategies: list[tuple[str, str | None]] = [
+        ("file", source_path.name),
+        ("csv", source_path.name),
+        ("file", source_path.with_suffix(".csv").name),
+    ]
+
+    for field_name, upload_name in strategies:
+        result = _import_attempt(
+            base_url,
+            source_path,
+            expected,
+            colname=None,
+            field_name=field_name,
+            upload_name=upload_name,
+        )
+        attempts.append(result)
+        if result.get("verified"):
+            return {
+                "mode": "combined",
+                "success": True,
+                "verified": True,
+                "importUrl": import_url,
+                "field": field_name,
+                "upload": result,
+                "verification": result.get("verification"),
+                "attempts": attempts,
+            }
     return None
 
 
@@ -557,7 +576,9 @@ def import_columns(
 
     verified = all(r.get("verified") for r in column_results if r.get("column"))
     http_ok = all(r.get("success") for r in column_results)
-    verify = _wait_for_column_counts(base_url, expected, timeout_s=30.0 if verified else 10.0)
+    verify = verify_column_counts(base_url, expected) if verified else _wait_for_column_counts(
+        base_url, expected, timeout_s=2.0
+    )
     verified = bool(verify.get("verified"))
 
     return {
