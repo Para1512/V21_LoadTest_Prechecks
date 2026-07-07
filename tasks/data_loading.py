@@ -138,11 +138,24 @@ def run_vts1_remediation(
             entry["rowCount"] = row_count
             messages.append(f"  Wrote {meta['txtFile']} ({row_count} data rows + header).")
 
-            imp = vts.import_txt(VTS1_URL, txt_path, columns=meta["clearColumns"])
+            headers, vts_rows = oq.rows_for_vts_import(issue_key, rows)
+            messages.append("  Importing into VTS 1 (single file POST /data/import_csv) …")
+            imp = vts.import_oracle_rows(
+                VTS1_URL,
+                headers,
+                vts_rows,
+                filename=meta["txtFile"],
+            )
+            if not imp.get("verified"):
+                messages.append("  Direct import failed — retrying from saved TXT file …")
+                imp = vts.import_txt(VTS1_URL, txt_path, columns=meta["clearColumns"])
             entry["import"] = imp
-            if not imp.get("success"):
+            if not imp.get("verified"):
                 entry["message"] = imp.get("message") or "VTS import failed verification."
                 messages.append(f"  FAILED — {entry['message']}")
+                upload = imp.get("upload") or {}
+                if upload.get("responseBody"):
+                    messages.append(f"    VTS response: {upload['responseBody'][:200]}")
                 if imp.get("verification"):
                     for row in imp["verification"].get("rows") or []:
                         messages.append(

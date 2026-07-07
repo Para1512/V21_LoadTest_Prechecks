@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import time
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import requests
@@ -14,8 +15,8 @@ VTS_REQUEST_TIMEOUT_S = 45
 VTS_IMPORT_TIMEOUT_S = 120
 VTS_JOB_POLL_INTERVAL_S = 0.2
 VTS_JOB_POLL_TIMEOUT_S = 15.0
-VTS_COUNT_VERIFY_TIMEOUT_S = 4.0
-VTS_COUNT_VERIFY_INTERVAL_S = 0.2
+VTS_COUNT_VERIFY_TIMEOUT_S = 20.0
+VTS_COUNT_VERIFY_INTERVAL_S = 0.5
 
 VTS1_MIN_COUNTS: dict[str, int] = {
     "P_BAN": 8000,
@@ -187,13 +188,19 @@ def _wait_for_column_counts(
     interval_s: float = VTS_COUNT_VERIFY_INTERVAL_S,
 ) -> dict[str, Any]:
     """VTS counts can lag briefly after import — short poll on get_page."""
+    last = verify_column_counts(base_url, expected)
+    if last.get("verified"):
+        return last
+    actuals = [row.get("actual") or 0 for row in last.get("rows") or []]
+    if actuals and all(int(a) == 0 for a in actuals):
+        return last
+
     deadline = time.monotonic() + timeout_s
-    last: dict[str, Any] = {"verified": False, "rows": []}
     while time.monotonic() < deadline:
+        time.sleep(interval_s)
         last = verify_column_counts(base_url, expected)
         if last.get("verified"):
             return last
-        time.sleep(interval_s)
     return last
 
 
@@ -279,150 +286,247 @@ def _parse_import_response(response: requests.Response) -> tuple[bool, str, Any]
             return True, "response success=true", detail
 
     lower = body_text.lower()
-    if lower and re.search(r"\b(error|failed|exception|invalid)\b", lower):
-        if not re.search(r"\b0\s+error", lower):
+    if lower and re.search(r"\b(error|failed|exception)\b", lower):
+        if not re.search(r"\b0\s+errors?\b", lower):
             return False, body_text[:500], detail
 
-    # Ambiguous HTTP 200 — caller must verify counts on VTS.
     return True, "HTTP OK (verify counts on VTS)", detail
 
 
-def _write_column_file(path: Path, colname: str, values: list[str], *, include_header: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    if include_header:
-        lines.append(colname)
-    lines.extend(v for v in values if v != "")
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n")
+def _normalize_csv_bytes(path: Path) -> bytes:
+    """VTS on Windows expects CRLF line endings in uploaded CSV/TXT."""
+    text = path.read_text(encoding="utf-8")
+    if not text.endswith("\n"):
+        text += "\n"
+    if "\r\n" not in text:
+        text = text.replace("\n", "\r\n")
+    return text.encode("utf-8")
 
 
-def _post_import_file(
-    base_url: str,
-    colname: str | None,
-    file_path: Path,
-    *,
-    field_name: str,
-    upload_name: str | None = None,
-) -> dict[str, Any]:
-    url = import_csv_url(base_url, colname)
-    send_name = upload_name or file_path.name
-    mime = "text/csv" if send_name.lower().endswith(".csv") else "text/plain"
-    with file_path.open("rb") as fh:
-        response = requests.post(
+def _upload_attempts(
+    url: str,
+    content: bytes,
+    filename: str,
+) -> list[tuple[str, Callable[[], requests.Response]]]:
+    """Build POST variants — manual VTS uses multipart file upload to /data/import_csv."""
+    attempts: list[tuple[str, Callable[[], requests.Response]]] = []
+    csv_name = filename if filename.lower().endswith(".csv") else f"{Path(filename).stem}.csv"
+
+    def _add(label: str, fn: Callable[[], requests.Response]) -> None:
+        attempts.append((label, fn))
+
+    # Manual VTS UI — most common shape first.
+    _add(
+        "multipart field=file (browser default)",
+        lambda: requests.post(
             url,
-            files={field_name: (send_name, fh, mime)},
+            files={"file": (filename, BytesIO(content))},
             timeout=VTS_IMPORT_TIMEOUT_S,
-        )
-    ok, message, detail = _parse_import_response(response)
-    result: dict[str, Any] = {
-        "importUrl": url,
-        "column": colname,
-        "file": send_name,
-        "httpStatus": response.status_code,
-        "success": ok,
-        "message": message,
-        "detail": detail,
-        "strategy": f"POST {url} field={field_name} upload={send_name}",
-    }
-    job_id = _extract_job_id(detail, response)
-    if job_id is not None:
-        result["jobId"] = job_id
-        poll = _poll_job_status(base_url, job_id)
-        result["jobPoll"] = poll
-        if poll.get("completed"):
-            result["success"] = bool(poll.get("success"))
-            result["message"] = poll.get("message") or message
-            if not poll.get("success"):
-                result["detail"] = poll.get("detail") or detail
-        elif poll.get("inconclusive"):
-            # Import may still have succeeded — let count verification decide.
-            result["success"] = ok
-            result["message"] = poll.get("message") or message
-    return result
+        ),
+    )
+    _add(
+        f"multipart field=file name={csv_name}",
+        lambda: requests.post(
+            url,
+            files={"file": (csv_name, BytesIO(content), "text/csv")},
+            timeout=VTS_IMPORT_TIMEOUT_S,
+        ),
+    )
+
+    for field in ("file", "csv", "upload"):
+        for name in (filename, csv_name):
+            for mime in (None, "text/csv", "application/octet-stream"):
+                if field == "file" and name == filename and mime is None:
+                    continue  # already added above
+                label = f"multipart field={field} name={name}"
+                if mime:
+                    label += f" mime={mime}"
+
+                def _post(
+                    f: str = field,
+                    n: str = name,
+                    m: str | None = mime,
+                ) -> requests.Response:
+                    bio = BytesIO(content)
+                    if m:
+                        return requests.post(
+                            url,
+                            files={f: (n, bio, m)},
+                            timeout=VTS_IMPORT_TIMEOUT_S,
+                        )
+                    return requests.post(
+                        url,
+                        files={f: (n, bio)},
+                        timeout=VTS_IMPORT_TIMEOUT_S,
+                    )
+
+                _add(label, _post)
+
+    for content_type in ("text/csv", "text/plain", "application/octet-stream"):
+        ct = content_type
+
+        def _raw(ct: str = content_type) -> requests.Response:
+            return requests.post(
+                url,
+                data=content,
+                headers={"Content-Type": ct},
+                timeout=VTS_IMPORT_TIMEOUT_S,
+            )
+
+        _add(f"raw body Content-Type={content_type}", _raw)
+
+    return attempts
 
 
-def _import_attempt(
+def _run_import_upload(
     base_url: str,
-    file_path: Path,
-    expected: dict[str, int],
+    content: bytes,
+    filename: str,
+    columns: list[str],
     *,
     colname: str | None = None,
-    field_name: str = "file",
-    upload_name: str | None = None,
 ) -> dict[str, Any]:
-    """Single POST import_csv + short count verification (fast path)."""
-    result = _post_import_file(
-        base_url,
-        colname,
-        file_path,
-        field_name=field_name,
-        upload_name=upload_name,
-    )
-    verify = _wait_for_column_counts(base_url, expected)
-    result["verification"] = verify
-    result["verified"] = bool(verify.get("verified"))
-    if result["verified"]:
-        result["success"] = True
-        result["message"] = "Import verified on VTS"
-    return result
-
-
-def _try_import_column(
-    base_url: str,
-    colname: str,
-    values: list[str],
-    work_dir: Path,
-    *,
-    expected_count: int,
-) -> dict[str, Any]:
-    """Import one column — fast path first, fallbacks only if needed."""
-    if not values:
-        return {"success": False, "message": "No values to import", "column": colname}
-
-    expected = {colname: expected_count}
+    """Try every POST shape to /data/import_csv until VTS column counts match."""
+    url = import_csv_url(base_url, colname)
+    col_values = read_columns_from_bytes(content, columns)
+    expected = {col: len(col_values[col]) for col in columns}
     attempts: list[dict[str, Any]] = []
-    path_hdr = work_dir / f"import_{colname}_hdr.txt"
-    _write_column_file(path_hdr, colname, values, include_header=True)
 
-    fast_strategies: list[tuple[str | None, Path, str, str | None]] = [
-        (None, path_hdr, "file", path_hdr.name),
-    ]
-    fallback_strategies: list[tuple[str | None, Path, str, str | None]] = [
-        (None, path_hdr, "csv", path_hdr.name),
-        (colname, path_hdr, "file", path_hdr.name),
-        (colname, path_hdr, "csv", path_hdr.name),
-    ]
+    for label, post_fn in _upload_attempts(url, content, filename):
+        try:
+            response = post_fn()
+        except requests.RequestException as exc:
+            attempts.append(
+                {
+                    "strategy": label,
+                    "importUrl": url,
+                    "success": False,
+                    "message": str(exc),
+                }
+            )
+            continue
 
-    for col_param, path, field_name, upload_name in fast_strategies + fallback_strategies:
-        result = _import_attempt(
-            base_url,
-            path,
-            expected,
-            colname=col_param,
-            field_name=field_name,
-            upload_name=upload_name,
-        )
-        result["column"] = colname
-        attempts.append(result)
-        if result.get("verified"):
-            result["attempts"] = attempts
-            return result
+        ok, message, detail = _parse_import_response(response)
+        entry: dict[str, Any] = {
+            "strategy": label,
+            "importUrl": url,
+            "httpStatus": response.status_code,
+            "success": ok,
+            "message": message,
+            "detail": detail,
+            "responseBody": (response.text or "")[:500],
+        }
+        job_id = _extract_job_id(detail, response)
+        if job_id is not None:
+            entry["jobId"] = job_id
+            poll = _poll_job_status(base_url, job_id)
+            entry["jobPoll"] = poll
+        attempts.append(entry)
 
+        if not response.ok:
+            continue
+
+        verify = _wait_for_column_counts(base_url, expected)
+        entry["verification"] = verify
+        if verify.get("verified"):
+            return {
+                "importUrl": url,
+                "strategy": label,
+                "httpStatus": response.status_code,
+                "success": True,
+                "verified": True,
+                "message": "Import verified on VTS",
+                "detail": detail,
+                "responseBody": entry.get("responseBody"),
+                "jobId": entry.get("jobId"),
+                "jobPoll": entry.get("jobPoll"),
+                "verification": verify,
+                "attempts": attempts,
+            }
+
+    last = attempts[-1] if attempts else {}
+    verify = verify_column_counts(base_url, expected)
     return {
+        "importUrl": url,
         "success": False,
-        "column": colname,
-        "message": (
-            "Import did not increase VTS column count "
-            f"(tried POST {import_csv_url(base_url, None)} and ?colname={colname})"
-        ),
+        "verified": False,
+        "message": last.get("message") or "All import upload attempts failed",
+        "detail": last.get("detail"),
+        "responseBody": last.get("responseBody"),
+        "verification": verify,
         "attempts": attempts,
     }
 
 
-def read_columns_from_export(path: Path, columns: list[str]) -> dict[str, list[str]]:
-    """Parse combined CSV (header + rows) or single-column file into per-column value lists."""
-    text = path.read_text(encoding="utf-8")
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+def import_csv_bytes(
+    base_url: str,
+    content: bytes,
+    filename: str,
+    columns: list[str],
+    *,
+    colname: str | None = None,
+) -> dict[str, Any]:
+    """
+    Import a single CSV/TXT file into VTS (P_BAN,P_SUBSCRIBER header + rows).
+    POST /data/import_csv then verify counts on get_page.
+    """
+    col_values = read_columns_from_bytes(content, columns)
+    expected = {col: len(col_values[col]) for col in columns}
+    if max(expected.values(), default=0) == 0:
+        raise RuntimeError(f"No data rows found in upload ({filename})")
+
+    result = _run_import_upload(
+        base_url, content, filename, columns, colname=colname
+    )
+    if not result.get("verified") and colname is None and len(columns) == 1:
+        result = _run_import_upload(
+            base_url, content, filename, columns, colname=columns[0]
+        )
+
+    verified = bool(result.get("verified"))
+    verify = result.get("verification") or verify_column_counts(base_url, expected)
+    return {
+        "success": verified,
+        "verified": verified,
+        "httpOk": any(a.get("httpStatus") == 200 for a in result.get("attempts") or []),
+        "columns": columns,
+        "expectedCounts": expected,
+        "mode": "single-file",
+        "upload": result,
+        "verification": verify,
+        "file": filename,
+        "message": (
+            "Import verified on VTS (single file → /data/import_csv)"
+            if verified
+            else (
+                f"VTS import failed — {result.get('message')}"
+                if not result.get("attempts")
+                else "VTS accepted upload but column counts did not update"
+            )
+        ),
+    }
+
+
+def import_csv_file(
+    base_url: str,
+    file_path: Path | str,
+    columns: list[str],
+) -> dict[str, Any]:
+    """Import one export file from disk (Oracle remediation TXT)."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise RuntimeError(f"Import file not found: {path}")
+    content = _normalize_csv_bytes(path)
+    return import_csv_bytes(base_url, content, path.name, columns, colname=None)
+
+
+def read_columns_from_bytes(content: bytes, columns: list[str]) -> dict[str, list[str]]:
+    text = content.decode("utf-8")
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").splitlines() if ln.strip()]
+    return _parse_column_lines(lines, columns)
+
+
+def _parse_column_lines(lines: list[str], columns: list[str]) -> dict[str, list[str]]:
     if not lines:
         return {col: [] for col in columns}
 
@@ -449,7 +553,6 @@ def read_columns_from_export(path: Path, columns: list[str]) -> dict[str, list[s
         out[col] = [ln.strip() for ln in lines[start:] if ln.strip()]
         return out
 
-    # Combined file without matching header — split by comma.
     for line in lines:
         parts = [p.strip() for p in line.split(",", len(columns) - 1)]
         if len(parts) < len(columns):
@@ -458,6 +561,63 @@ def read_columns_from_export(path: Path, columns: list[str]) -> dict[str, list[s
             if val:
                 out[col].append(val)
     return out
+
+
+def read_columns_from_export(path: Path, columns: list[str]) -> dict[str, list[str]]:
+    """Parse combined CSV (header + rows) or single-column file into per-column value lists."""
+    return read_columns_from_bytes(path.read_bytes(), columns)
+
+
+def import_columns(
+    base_url: str,
+    columns: list[str],
+    source_txt: Path | str,
+    *,
+    work_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Import one file into VTS via POST /data/import_csv (single-file, all columns)."""
+    _ = work_dir  # kept for API compatibility
+    return import_csv_file(base_url, source_txt, columns)
+
+
+def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = None) -> dict[str, Any]:
+    """Import export file; columns inferred from filename or passed explicitly."""
+    path = Path(txt_path)
+    if columns is None:
+        name = path.name.upper()
+        if "P_BAN" in name and "SUBSCRIBER" in name:
+            columns = ["P_BAN", "P_SUBSCRIBER"]
+        elif "P_SIM" in name:
+            columns = ["P_SIM"]
+        elif "IMEI" in name:
+            columns = ["P_IMEI_IP14128PUR"]
+        else:
+            columns = []
+    if not columns:
+        raise RuntimeError(f"Cannot infer VTS columns for import file: {path.name}")
+    return import_csv_file(base_url, path, columns)
+
+
+def build_csv_bytes(headers: list[str], rows: list[tuple[str, ...]]) -> bytes:
+    """Build CRLF CSV bytes for VTS single-file import."""
+    lines = [",".join(headers)]
+    for row in rows:
+        lines.append(",".join(str(c or "").strip() for c in row))
+    text = "\r\n".join(lines) + "\r\n"
+    return text.encode("utf-8")
+
+
+def import_oracle_rows(
+    base_url: str,
+    headers: list[str],
+    rows: list[tuple[Any, ...]],
+    *,
+    filename: str = "import.csv",
+) -> dict[str, Any]:
+    """Import Oracle query rows directly into VTS without writing a persistent file."""
+    str_rows = [tuple(str(c or "").strip() for c in row) for row in rows]
+    content = build_csv_bytes(headers, str_rows)
+    return import_csv_bytes(base_url, content, filename, headers, colname=None)
 
 
 def verify_column_counts(
@@ -478,146 +638,6 @@ def verify_column_counts(
             all_ok = False
         rows.append({"column": col, "expected": need, "actual": actual, "passed": ok})
     return {"verified": all_ok, "rows": rows, "countsPerColumn": counts}
-
-
-def _try_import_combined_file(
-    base_url: str,
-    source_path: Path,
-    columns: list[str],
-    expected: dict[str, int],
-) -> dict[str, Any] | None:
-    """
-    Manual VTS UI: POST {VTS1}/data/import_csv (no colname) with combined CSV file,
-    then poll /data/job_status?jobid=N. Fast path matches manual (~1s).
-    """
-    attempts: list[dict[str, Any]] = []
-    import_url = import_csv_url(base_url, None)
-
-    strategies: list[tuple[str, str | None]] = [
-        ("file", source_path.name),
-        ("csv", source_path.name),
-        ("file", source_path.with_suffix(".csv").name),
-    ]
-
-    for field_name, upload_name in strategies:
-        result = _import_attempt(
-            base_url,
-            source_path,
-            expected,
-            colname=None,
-            field_name=field_name,
-            upload_name=upload_name,
-        )
-        attempts.append(result)
-        if result.get("verified"):
-            return {
-                "mode": "combined",
-                "success": True,
-                "verified": True,
-                "importUrl": import_url,
-                "field": field_name,
-                "upload": result,
-                "verification": result.get("verification"),
-                "attempts": attempts,
-            }
-    return None
-
-
-def import_columns(
-    base_url: str,
-    columns: list[str],
-    source_txt: Path | str,
-    *,
-    work_dir: Path | None = None,
-) -> dict[str, Any]:
-    """
-    Import into VTS via POST /data/import_csv (same as manual VTS UI), then job_status poll.
-    Multi-column files use plain /data/import_csv; single-column falls back to ?colname=.
-    """
-    path = Path(source_txt)
-    if not path.is_file():
-        raise RuntimeError(f"Import file not found: {path}")
-
-    col_values = read_columns_from_export(path, columns)
-    expected = {col: len(col_values[col]) for col in columns}
-    if sum(expected.values()) == 0:
-        raise RuntimeError(f"No data rows found in {path.name}")
-
-    wd = work_dir or path.parent
-    combined = None
-    if len(columns) > 1:
-        combined = _try_import_combined_file(base_url, path, columns, expected)
-
-    if combined:
-        return {
-            "success": True,
-            "verified": True,
-            "httpOk": True,
-            "columns": columns,
-            "expectedCounts": expected,
-            "mode": "combined",
-            "combinedResult": combined,
-            "verification": combined.get("verification"),
-            "file": path.name,
-            "message": "Import verified on VTS (POST /data/import_csv + job_status)",
-        }
-
-    column_results: list[dict[str, Any]] = []
-    for col in columns:
-        values = col_values[col]
-        if not values:
-            column_results.append(
-                {"success": False, "column": col, "message": "No values for column in export file"}
-            )
-            continue
-        column_results.append(
-            _try_import_column(base_url, col, values, wd, expected_count=len(values))
-        )
-
-    verified = all(r.get("verified") for r in column_results if r.get("column"))
-    http_ok = all(r.get("success") for r in column_results)
-    verify = verify_column_counts(base_url, expected) if verified else _wait_for_column_counts(
-        base_url, expected, timeout_s=2.0
-    )
-    verified = bool(verify.get("verified"))
-
-    return {
-        "success": http_ok and verified,
-        "verified": verified,
-        "httpOk": http_ok,
-        "columns": columns,
-        "expectedCounts": expected,
-        "columnResults": column_results,
-        "verification": verify,
-        "file": path.name,
-        "message": (
-            "Import verified on VTS"
-            if verified
-            else (
-                "VTS import job finished but column counts are still wrong — check job_status / file format"
-                if http_ok
-                else "VTS import HTTP/request or job_status failed"
-            )
-        ),
-    }
-
-
-def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = None) -> dict[str, Any]:
-    """Import export file; columns inferred from filename or passed explicitly."""
-    path = Path(txt_path)
-    if columns is None:
-        name = path.name.upper()
-        if "P_BAN" in name and "SUBSCRIBER" in name:
-            columns = ["P_BAN", "P_SUBSCRIBER"]
-        elif "P_SIM" in name:
-            columns = ["P_SIM"]
-        elif "IMEI" in name:
-            columns = ["P_IMEI_IP14128PUR"]
-        else:
-            columns = []
-    if not columns:
-        raise RuntimeError(f"Cannot infer VTS columns for import file: {path.name}")
-    return import_columns(base_url, columns, path, work_dir=path.parent)
 
 
 def column_count(counts_per_column: Any, column: str) -> int | None:

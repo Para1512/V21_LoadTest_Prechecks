@@ -588,16 +588,29 @@ function renderVtsRemediationSection(remediationRuns) {
         block.appendChild(msg);
       }
       const imp = r.import;
-      if (imp?.combinedResult?.importUrl || imp?.combinedResult?.upload?.importUrl) {
+      const upload = imp?.upload || imp?.combinedResult?.upload || {};
+      const importUrl = imp?.upload?.importUrl || imp?.combinedResult?.importUrl || upload.importUrl;
+      if (importUrl) {
         const job = document.createElement("p");
         job.className = "data-loading-vts-meta";
-        const url = imp.combinedResult.importUrl || imp.combinedResult.upload.importUrl;
-        const jobId = imp.combinedResult.upload?.jobId;
-        job.textContent = jobId
-          ? `Import: ${url} → job ${jobId} (job_status polled)`
-          : `Import: ${url}`;
+        job.textContent = upload.jobId
+          ? `Import: ${importUrl} → job ${upload.jobId}`
+          : `Import: ${importUrl}`;
         block.appendChild(job);
-      } else if (imp?.columnResults?.length) {
+      }
+      if (upload.strategy) {
+        const strat = document.createElement("p");
+        strat.className = "data-loading-vts-meta";
+        strat.textContent = `Upload: ${upload.strategy}`;
+        block.appendChild(strat);
+      }
+      if (upload.responseBody && !r.success) {
+        const resp = document.createElement("p");
+        resp.className = "data-loading-vts-unsafe";
+        resp.textContent = `VTS response: ${upload.responseBody}`;
+        block.appendChild(resp);
+      }
+      if (imp?.columnResults?.length) {
         imp.columnResults.forEach((cr) => {
           const attempts = cr.attempts || [cr];
           const last = attempts[attempts.length - 1];

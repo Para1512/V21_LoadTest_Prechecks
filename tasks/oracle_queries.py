@@ -137,6 +137,30 @@ def run_sql(sql: str) -> tuple[list[tuple[Any, ...]], list[str]]:
         conn.close()
 
 
+def rows_for_vts_import(
+    issue_key: str,
+    rows: list[tuple[Any, ...]],
+) -> tuple[list[str], list[tuple[str, ...]]]:
+    """Convert Oracle rows to (headers, data rows) for single-file VTS import."""
+    meta = QUERY_META[issue_key]
+    headers = list(meta["headers"])
+    out: list[tuple[str, ...]] = []
+    for row in rows:
+        if issue_key == "ban_subscriber":
+            if len(row) >= 2:
+                out.append((str(row[0] or "").strip(), str(row[1] or "").strip()))
+            else:
+                ban, sub = ora.split_ban_sub(str(row[0] if row else ""))
+                out.append((ban, sub))
+        elif issue_key == "p_sim":
+            out.append((str(row[0] or "").strip(),))
+        elif issue_key == "p_imei_ip14128pur":
+            out.append((str(row[0] or "").strip(),))
+        else:
+            out.append(tuple(str(row[i] if i < len(row) else "") for i in range(len(headers))))
+    return headers, out
+
+
 def write_remediation_txt(
     path: Path,
     issue_key: str,
@@ -147,21 +171,22 @@ def write_remediation_txt(
     headers = meta["headers"]
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
-    with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(",".join(headers) + "\n")
-        for row in rows:
-            if issue_key == "ban_subscriber":
-                if len(row) >= 2:
-                    ban, sub = str(row[0] or "").strip(), str(row[1] or "").strip()
-                else:
-                    ban, sub = ora.split_ban_sub(str(row[0] if row else ""))
-                f.write(f"{ban},{sub}\n")
-            elif issue_key == "p_sim":
-                f.write(f"{str(row[0] or '').strip()}\n")
-            elif issue_key == "p_imei_ip14128pur":
-                f.write(f"{str(row[0] or '').strip()}\n")
+    lines = [",".join(headers)]
+    for row in rows:
+        if issue_key == "ban_subscriber":
+            if len(row) >= 2:
+                ban, sub = str(row[0] or "").strip(), str(row[1] or "").strip()
             else:
-                vals = [str(row[i] if i < len(row) else "") for i in range(len(headers))]
-                f.write(",".join(vals) + "\n")
-            count += 1
+                ban, sub = ora.split_ban_sub(str(row[0] if row else ""))
+            lines.append(f"{ban},{sub}")
+        elif issue_key == "p_sim":
+            lines.append(f"{str(row[0] or '').strip()}")
+        elif issue_key == "p_imei_ip14128pur":
+            lines.append(f"{str(row[0] or '').strip()}")
+        else:
+            vals = [str(row[i] if i < len(row) else "") for i in range(len(headers))]
+            lines.append(",".join(vals))
+        count += 1
+    text = "\r\n".join(lines) + "\r\n"
+    path.write_bytes(text.encode("utf-8"))
     return count
