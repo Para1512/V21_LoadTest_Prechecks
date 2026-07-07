@@ -24,8 +24,8 @@ P_SIM_VTS1_ROW_LIMIT = 40000
 P_SIM_QUERY_ROW_LIMIT = 50000
 
 DEFAULT_P_IMEI_SQL = (
-    "SELECT /*+ PARALLEL*/ REPLACE(d.ESN_IMEI, ' ', ') AS IMEI, "
-    "REPLACE(SUBSTR(d.ESN_IMEI, 1, 8), ' ', ') AS sstring "
+    "SELECT /*+ PARALLEL*/ REPLACE(d.ESN_IMEI, ' ', ' ') AS IMEI, "
+    "REPLACE(SUBSTR(d.ESN_IMEI, 1, 8), ' ', ' ') AS sstring "
     "FROM dealer_equipment d, item_definition i "
     "WHERE d.item_id = i.item_id "
     "AND D.ESN_IMEI NOT IN ("
@@ -33,9 +33,11 @@ DEFAULT_P_IMEI_SQL = (
     "AND D.ESN_IMEI NOT IN (SELECT UNIT_ESN FROM physical_device) "
     "AND d.esn_imei NOT IN ("
     "SELECT phd.unit_esn FROM physical_device phd WHERE phd.unit_esn = D.ESN_IMEI) "
-    "AND d.item_id = 'IP14128MDN' "
-    "AND NVL(d.franchise_type, 'R') <> 'F' AND rownum <= 10000"
+    "AND d.item_id = 'IP14128STR' "
+    "AND NVL(d.franchise_type, 'R') <> 'F' AND rownum <= 20000"
 )
+
+P_IMEI_QUERY_ROW_LIMIT = 20000
 
 QUERY_KEYS = ("ban_subscriber", "p_sim", "p_imei_ip14128pur")
 
@@ -61,10 +63,11 @@ QUERY_META: dict[str, dict[str, Any]] = {
     },
     "p_imei_ip14128pur": {
         "id": "p_imei_ip14128pur",
-        "label": "VTS 1 — P_IMEI_IP14128PUR",
+        "label": "VTS 1 — P_IMEI_IP14128PUR (Validation 3)",
         "clearColumns": ["P_IMEI_IP14128PUR"],
         "txtFile": "P_IMEI_IP14128PUR.txt",
         "headers": ["P_IMEI_IP14128PUR"],
+        "queryRowLimit": P_IMEI_QUERY_ROW_LIMIT,
     },
 }
 
