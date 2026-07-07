@@ -68,7 +68,7 @@ VTS1_CLEAR_COLUMNS = [
 
 VTS2_CLEAR_COLUMNS = ["HUP_BAN", "Resume_BAN"]
 
-VTS1_P_BAN_RELOAD_COLUMNS = ["P_BAN", "P_SUBSCRIBER"]
+VTS_IMPORT_FIELD = "fileToUpload"
 
 
 def vts_api_root(base_url: str) -> str:
@@ -286,7 +286,7 @@ def _parse_import_response(response: requests.Response) -> tuple[bool, str, Any]
             return True, "response success=true", detail
 
     lower = body_text.lower()
-    if lower and re.search(r"\b(error|failed|exception)\b", lower):
+    if lower and re.search(r"\b(typeerror|error|failed|exception)\b", lower):
         if not re.search(r"\b0\s+errors?\b", lower):
             return False, body_text[:500], detail
 
@@ -308,36 +308,39 @@ def _upload_attempts(
     content: bytes,
     filename: str,
 ) -> list[tuple[str, Callable[[], requests.Response]]]:
-    """Build POST variants — manual VTS uses multipart file upload to /data/import_csv."""
+    """
+    HPE VTS import_csv expects multipart field name 'fileToUpload'
+    (see HPE VTS web/admin/data.js — path.basename on uploaded file path).
+    """
     attempts: list[tuple[str, Callable[[], requests.Response]]] = []
     csv_name = filename if filename.lower().endswith(".csv") else f"{Path(filename).stem}.csv"
 
     def _add(label: str, fn: Callable[[], requests.Response]) -> None:
         attempts.append((label, fn))
 
-    # Manual VTS UI — most common shape first.
+    # HPE VTS UI — field=fileToUpload (required; 'file' yields path undefined TypeError).
     _add(
-        "multipart field=file (browser default)",
+        f"multipart field={VTS_IMPORT_FIELD}",
         lambda: requests.post(
             url,
-            files={"file": (filename, BytesIO(content))},
+            files={VTS_IMPORT_FIELD: (filename, BytesIO(content))},
             timeout=VTS_IMPORT_TIMEOUT_S,
         ),
     )
     _add(
-        f"multipart field=file name={csv_name}",
+        f"multipart field={VTS_IMPORT_FIELD} name={csv_name}",
         lambda: requests.post(
             url,
-            files={"file": (csv_name, BytesIO(content), "text/csv")},
+            files={VTS_IMPORT_FIELD: (csv_name, BytesIO(content), "text/csv")},
             timeout=VTS_IMPORT_TIMEOUT_S,
         ),
     )
 
-    for field in ("file", "csv", "upload"):
+    for field in (VTS_IMPORT_FIELD, "file", "csv"):
         for name in (filename, csv_name):
-            for mime in (None, "text/csv", "application/octet-stream"):
-                if field == "file" and name == filename and mime is None:
-                    continue  # already added above
+            for mime in (None, "text/csv"):
+                if field == VTS_IMPORT_FIELD and name == filename and mime is None:
+                    continue
                 label = f"multipart field={field} name={name}"
                 if mime:
                     label += f" mime={mime}"
@@ -361,19 +364,6 @@ def _upload_attempts(
                     )
 
                 _add(label, _post)
-
-    for content_type in ("text/csv", "text/plain", "application/octet-stream"):
-        ct = content_type
-
-        def _raw(ct: str = content_type) -> requests.Response:
-            return requests.post(
-                url,
-                data=content,
-                headers={"Content-Type": ct},
-                timeout=VTS_IMPORT_TIMEOUT_S,
-            )
-
-        _add(f"raw body Content-Type={content_type}", _raw)
 
     return attempts
 
@@ -423,7 +413,7 @@ def _run_import_upload(
             entry["jobPoll"] = poll
         attempts.append(entry)
 
-        if not response.ok:
+        if not response.ok or not ok:
             continue
 
         verify = _wait_for_column_counts(base_url, expected)
