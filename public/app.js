@@ -588,10 +588,14 @@ function renderVtsRemediationSection(remediationRuns) {
         block.appendChild(msg);
       }
       const imp = r.import;
-      if (imp?.combinedResult?.upload?.jobId) {
+      if (imp?.combinedResult?.importUrl || imp?.combinedResult?.upload?.importUrl) {
         const job = document.createElement("p");
         job.className = "data-loading-vts-meta";
-        job.textContent = `VTS import job ${imp.combinedResult.upload.jobId} (job_status polled)`;
+        const url = imp.combinedResult.importUrl || imp.combinedResult.upload.importUrl;
+        const jobId = imp.combinedResult.upload?.jobId;
+        job.textContent = jobId
+          ? `Import: ${url} → job ${jobId} (job_status polled)`
+          : `Import: ${url}`;
         block.appendChild(job);
       } else if (imp?.columnResults?.length) {
         imp.columnResults.forEach((cr) => {

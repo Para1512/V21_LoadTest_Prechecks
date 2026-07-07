@@ -311,13 +311,14 @@ def _post_import_file(
         )
     ok, message, detail = _parse_import_response(response)
     result: dict[str, Any] = {
+        "importUrl": url,
         "column": colname,
         "file": send_name,
         "httpStatus": response.status_code,
         "success": ok,
         "message": message,
         "detail": detail,
-        "strategy": f"colname={colname or 'none'}, field={field_name}, upload={send_name}",
+        "strategy": f"POST {url} field={field_name} upload={send_name}",
     }
     job_id = _extract_job_id(detail, response)
     if job_id is not None:
@@ -344,39 +345,48 @@ def _try_import_column(
         return {"success": False, "message": "No values to import", "column": colname}
 
     attempts: list[dict[str, Any]] = []
-    strategies = (
-        (True, "file", None),
-        (False, "file", None),
-        (True, "csv", None),
-        (False, "csv", None),
-        (True, "file", ".csv"),
-        (False, "file", ".csv"),
-    )
-    for include_header, field_name, ext_override in strategies:
+    # Manual VTS: POST /data/import_csv with single-column file (header = colname).
+    strategies: list[tuple[bool, str | None, str | None]] = [
+        (True, None, None),
+        (False, None, None),
+        (True, colname, None),
+        (False, colname, None),
+        (True, colname, ".csv"),
+        (False, colname, ".csv"),
+    ]
+    for include_header, col_param, ext_override in strategies:
         tag = "hdr" if include_header else "plain"
         suffix = ext_override or ".txt"
-        path = work_dir / f"import_{colname}_{tag}_{field_name}{suffix}"
+        path = work_dir / f"import_{colname}_{tag}{suffix}"
         _write_column_file(path, colname, values, include_header=include_header)
         upload_name = f"{colname}{suffix}" if ext_override else path.name
-        result = _post_import_file(
-            base_url, colname, path, field_name=field_name, upload_name=upload_name
-        )
-        time.sleep(1.0)
-        check = _wait_for_column_counts(base_url, {colname: expected_count})
-        row = (check.get("rows") or [{}])[0]
-        result["countCheck"] = row
-        result["verified"] = bool(row.get("passed"))
-        result["countWait"] = check
-        attempts.append(result)
-        if result.get("verified"):
-            result["success"] = True
-            result["attempts"] = attempts
-            return result
+        for field_name in ("file", "csv"):
+            result = _post_import_file(
+                base_url,
+                col_param,
+                path,
+                field_name=field_name,
+                upload_name=upload_name,
+            )
+            time.sleep(1.0)
+            check = _wait_for_column_counts(base_url, {colname: expected_count})
+            row = (check.get("rows") or [{}])[0]
+            result["countCheck"] = row
+            result["verified"] = bool(row.get("passed"))
+            result["countWait"] = check
+            attempts.append(result)
+            if result.get("verified"):
+                result["success"] = True
+                result["attempts"] = attempts
+                return result
 
     return {
         "success": False,
         "column": colname,
-        "message": "Import did not increase VTS column count (tried colname + header/plain variants)",
+        "message": (
+            "Import did not increase VTS column count "
+            f"(tried POST {import_csv_url(base_url, None)} and ?colname={colname})"
+        ),
         "attempts": attempts,
     }
 
@@ -448,50 +458,49 @@ def _try_import_combined_file(
     columns: list[str],
     expected: dict[str, int],
 ) -> dict[str, Any] | None:
-    """Upload combined CSV (e.g. P_BAN,P_SUBSCRIBER) — matches manual VTS UI + job_status."""
+    """
+    Manual VTS UI: POST {VTS1}/data/import_csv (no colname) with combined CSV file,
+    then poll /data/job_status?jobid=N.
+    """
     attempts: list[dict[str, Any]] = []
-    colname_variants: list[str | None] = [None]
-    if columns:
-        colname_variants.append(columns[0])
+    import_url = import_csv_url(base_url, None)
 
-    for colname in colname_variants:
-        for field_name in ("file", "csv"):
-            for upload_name in (source_path.name, source_path.with_suffix(".csv").name):
-                result = _post_import_file(
-                    base_url,
-                    colname,
-                    source_path,
-                    field_name=field_name,
-                    upload_name=upload_name,
-                )
-                attempts.append(result)
-                time.sleep(1.0)
-                verify = _wait_for_column_counts(base_url, expected)
-                verified = bool(verify.get("verified"))
-                if verified:
+    for field_name in ("file", "csv", "upload"):
+        for upload_name in (source_path.name, source_path.with_suffix(".csv").name):
+            result = _post_import_file(
+                base_url,
+                None,
+                source_path,
+                field_name=field_name,
+                upload_name=upload_name,
+            )
+            attempts.append(result)
+            time.sleep(1.0)
+            verify = _wait_for_column_counts(base_url, expected)
+            if verify.get("verified"):
+                return {
+                    "mode": "combined",
+                    "success": True,
+                    "verified": True,
+                    "importUrl": import_url,
+                    "field": field_name,
+                    "upload": result,
+                    "verification": verify,
+                    "attempts": attempts,
+                }
+            if result.get("jobId") and result.get("success"):
+                verify = _wait_for_column_counts(base_url, expected, timeout_s=90.0)
+                if verify.get("verified"):
                     return {
                         "mode": "combined",
                         "success": True,
                         "verified": True,
-                        "colname": colname,
+                        "importUrl": import_url,
                         "field": field_name,
                         "upload": result,
                         "verification": verify,
                         "attempts": attempts,
                     }
-                if result.get("jobId") and result.get("success"):
-                    verify = _wait_for_column_counts(base_url, expected, timeout_s=90.0)
-                    if verify.get("verified"):
-                        return {
-                            "mode": "combined",
-                            "success": True,
-                            "verified": True,
-                            "colname": colname,
-                            "field": field_name,
-                            "upload": result,
-                            "verification": verify,
-                            "attempts": attempts,
-                        }
     return None
 
 
@@ -503,7 +512,8 @@ def import_columns(
     work_dir: Path | None = None,
 ) -> dict[str, Any]:
     """
-    Import into VTS: combined CSV + job_status poll first; then per-column ?colname=.
+    Import into VTS via POST /data/import_csv (same as manual VTS UI), then job_status poll.
+    Multi-column files use plain /data/import_csv; single-column falls back to ?colname=.
     """
     path = Path(source_txt)
     if not path.is_file():
@@ -530,7 +540,7 @@ def import_columns(
             "combinedResult": combined,
             "verification": combined.get("verification"),
             "file": path.name,
-            "message": "Import verified on VTS (combined file + job_status)",
+            "message": "Import verified on VTS (POST /data/import_csv + job_status)",
         }
 
     column_results: list[dict[str, Any]] = []
