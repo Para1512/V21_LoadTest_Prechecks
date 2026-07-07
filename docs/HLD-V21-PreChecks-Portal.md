@@ -1,428 +1,257 @@
-# High Level Design (HLD)
-# V21 PreChecks Automation Portal
+# V21 PreChecks Automation Portal — High Level Design
 
-| Field | Value |
-|-------|--------|
-| **Document** | HLD — V21 PreChecks Portal |
-| **Purpose** | Automate PET / V21 test preparatory checks before performance testing |
-| **Primary users** | QE Performance Engineering |
-| **Runtime** | Python Flask backend (`python app.py`) + browser UI |
-| **Environment** | VDI (primary), developer workstation via Git sync |
+**What is this?**  
+A simple web portal that runs pre-test checks before V21 performance testing. Instead of jumping between tools, emails, and manual scripts, QE runs everything from one screen on the VDI.
+
+**Who uses it?** QE Performance Engineering  
+**How to run it?** `python app.py` → open the portal in a browser
 
 ---
 
-## 1. Executive summary
+## What the portal does (in one sentence)
 
-The **V21 PreChecks Automation Portal** consolidates repetitive pre-test activities for Rogers V21 PET into a single web UI. Operators run ordered checks (data loading, disk space, log space, server bounce, health) and trigger support emails to DBA / NPE teams without manual copy-paste across tools.
-
-The portal does **not** replace production change tools; it orchestrates **read checks**, **remediation where automated**, and **notifications** to the right support groups.
+It checks that test data, disks, logs, and servers are ready — and sends the right emails to DBA / NPE when manual work is needed.
 
 ---
 
-## 2. System context
+## Email triggers (top of the page)
 
-```
-┌─────────────────┐     HTTP      ┌──────────────────────┐
-│  Browser (UI)   │ ◄──────────► │  Flask API (app.py)   │
-│  public/        │               │  tasks/*.py           │
-└─────────────────┘               └──────────┬───────────┘
-                                             │
-         ┌───────────────────────────────────┼───────────────────────────────┐
-         │                                   │                               │
-         ▼                                   ▼                               ▼
-  ┌─────────────┐                    ┌─────────────┐                 ┌─────────────┐
-  │ VTS 1/2     │                    │ Oracle DB   │                 │ NPE CGI     │
-  │ :2244/:2245 │                    │ PET1_CUST   │                 │ npe-services│
-  └─────────────┘                    └─────────────┘                 └─────────────┘
-         │                                   │                               │
-         │                            SMTP (email)                    ReqCentral /
-         │                                   │                         JIRA browse
-         ▼                                   ▼                               ▼
-  ┌─────────────┐                    ┌─────────────┐                 ┌─────────────┐
-  │ LG servers  │                    │ DBA / NPE   │                 │ Batch portal│
-  │ WMI disk    │                    │ mailboxes   │                 │ NPR bounce  │
-  └─────────────┘                    └─────────────┘                 └─────────────┘
-```
+### HUP Offer Cleanup
 
-### 2.1 Configuration
+**What you want to happen**
 
-Secrets and environment-specific values live in **`.env`** (not in GitHub). Template: `.env.example`.
+1. A JIRA Business Request (BR) is raised for the cleanup.
+2. An email goes to DBA Support with the BR attached.
+3. DBA runs `TRUNCATE TABLE HUP_OFFER` on PCUST_DB.
 
-Key groups: `ORACLE_*`, `VTS1_URL`, `VTS2_URL`, `SMTP_*`, `NPE_SERVICES_CGI_BASE`, optional `LG_WMI_*`.
+**What the portal does today**
+
+- Click the button → email is sent to **RCI V21 DBA Support** (QE is CC’d).
+- Email asks DBA to truncate HUP_OFFER.
+- **JIRA BR creation and attachment are not automated yet** — you still raise the BR separately.
 
 ---
 
-## 3. Portal sections (top to bottom)
+### CRM IGW Bounce Mail
 
-| Section | Description |
-|---------|-------------|
-| **Email Triggers** | One-click emails for DBA / NPE preparatory work |
-| **Automation Tasks** | Numbered tasks 1–6 with RUN / SKIP and expandable output |
+**What you want to happen**
 
-Additional Task 1 controls: **Test Oracle DB**, **Oracle Queries** (edit remediation SQL).
+1. A JIRA BR is raised for the reboot.
+2. An email goes to NPE Support with the BR attached.
+3. NPE reboots CRM IGW Domain 1 servers.
 
----
+**What the portal does today**
 
-## 4. Email triggers
-
-### 4.1 HUP Offer Cleanup
-
-| Item | Detail |
-|------|--------|
-| **UI button** | `HUP Offer Cleanup - Trigger Email` |
-| **API** | `POST /api/email/hup-offer-cleanup` |
-| **To** | `#RCI_V21 DBA Support` (RCIV21DBASupport@rci.rogers.com) |
-| **CC** | QE Performance Engineering |
-| **Subject** | Rogers V21 \| PET \| Test Preparatory Activities |
-| **Request** | Execute `TRUNCATE TABLE HUP_OFFER` in **PCUST_DB** |
-
-**Intended end-to-end process**
-
-1. Create a **JIRA Business Request (BR)** for the HUP offer cleanup activity.
-2. Attach the BR reference to the notification email.
-3. Send email to DBA Support so they execute the truncate on PCUST_DB.
-
-**Current implementation**
-
-- Portal sends the SMTP email with the truncate request text.
-- **JIRA BR auto-creation and BR attachment are not yet wired in code** — BR is still raised manually (or via separate process) before/after triggering the email.
+- Click the button → email is sent to **RCI V21 NPE Support** (QE is CC’d).
+- Email asks NPE to reboot CRM IGW Domain 1.
+- **JIRA BR automation is not built yet** — same as HUP, BR is manual for now.
 
 ---
 
-### 4.2 CRM IGW Bounce Mail
+## Task 1 — Data Loading
 
-| Item | Detail |
-|------|--------|
-| **UI button** | `CRM IGW Bounce - Trigger Email` |
-| **API** | `POST /api/email/crm-igw-bounce` |
-| **To** | `#RCI_V21 NPE Support` (RCIV21NPESupport@rci.rogers.com) |
-| **CC** | QE Performance Engineering |
-| **Subject** | Rogers V21 \| PET \| Test Preparatory Activities |
-| **Request** | Reboot **CRM IGW Domain 1** servers |
+**Goal:** Make sure VTS test data is complete, correct, and old junk columns are cleared.
 
-**Intended end-to-end process**
+**Systems involved**
 
-1. Create a **JIRA BR** for CRM IGW Domain 1 reboot.
-2. Attach the BR to the email to NPE Support.
-
-**Current implementation**
-
-- Portal sends the SMTP email with the reboot request.
-- **JIRA BR automation / attachment — planned; not yet implemented in portal.**
+- **VTS 1** — port 2244  
+- **VTS 2** — port 2245  
+- **Oracle** — when VTS 1 needs fresh data  
 
 ---
 
-## 5. Task 1 — Data Loading
+### Step 1 — Pre-check (enough data?)
 
-**Purpose:** Validate Virtual Test System (VTS) test data on VTS1 and VTS2, remediate VTS1 gaps from Oracle, remove stale test columns, and confirm readiness for PET.
+The portal reads row counts from VTS and checks minimums.
 
-**Targets**
+**VTS 1 — need at least:**
 
-| Instance | Host | Port | API base |
-|----------|------|------|----------|
-| VTS 1 | vm0196ptlrg001 | 2244 | `GET /data/get_page`, `clear_column`, `import_csv` |
-| VTS 2 | vm0196ptlrg001 | 2245 | Same pattern |
-
-**Entry point:** `POST /api/tasks/data-loading/run-flow` (Task 1 **RUN**)
-
-### 5.1 High-level flow
-
-```
-RUN Task 1
-    │
-    ▼
-┌─────────────────────┐
-│ Phase A: Pre-check  │  Minimum counts on VTS1 + VTS2
-└─────────┬───────────┘
-          │ fail VTS1 columns?
-          ▼
-┌─────────────────────┐
-│ VTS1 remediation    │  Oracle → TXT → clear column → import_csv
-└─────────┬───────────┘
-          │ re-run pre-check
-          ▼
-     All minimums OK?
-          │ no → stop (insufficient data)
-          ▼ yes
-┌─────────────────────┐
-│ Phase B: Prep       │  Alignment validations + clear old test data
-└─────────┬───────────┘
-          │ fail VTS1 validations?
-          ▼
-┌─────────────────────┐
-│ VTS1 remediation    │  (same as above, then retry prep)
-└─────────┬───────────┘
-          ▼
-     Prep complete → "Old test data has been removed"
-```
-
-### 5.2 Phase A — Pre-check (minimum counts)
-
-Queries `countsPerColumn` from each VTS `get_page` API.
-
-**VTS 1 — all must pass (count ≥ threshold)**
-
-| Column | Minimum count |
+| Column | Minimum rows |
 |--------|----------------|
 | P_BAN | 8,000 |
 | P_SIM | 8,000 |
 | P_IMEI_IP14128PUR | 8,000 |
 
-**VTS 2 — all must pass**
+**VTS 2 — need at least:**
 
-| Column | Minimum count |
+| Column | Minimum rows |
 |--------|----------------|
 | P_BAN_C | 1,000 |
 | P_BAN_H | 1,000 |
 
-**Outcome:** Per-column **Passed / Failed** with count. If any fail, flow attempts VTS1 remediation (below) then re-checks. If still failing, task stops.
+Each column shows **Passed** or **Failed** with the actual count.
 
-### 5.3 Phase B — Data details & validations
-
-After pre-check passes, prep re-reads counts and runs alignment rules.
-
-**VTS 1 — data details displayed**
-
-- P_BAN, P_SUBSCRIBER, P_SIM, P_IMEI_IP14128PUR
-
-**VTS 1 — validation rules**
-
-| Rule | Condition |
-|------|-----------|
-| P_BAN & P_SUBSCRIBER alignment | Counts must be **equal** |
-| P_SIM minimum | Count ≥ **8,000** |
-| P_IMEI_IP14128PUR minimum | Count ≥ **8,000** |
-
-**VTS 2 — validation rules**
-
-| Rule | Columns that must have **equal** counts |
-|------|----------------------------------------|
-| Current group | P_BAN_C, P_NPA_NXX_C, P_SUBSCRIBER_C, P_IMEI_C, P_SIM_C, P_ESN_0, P_ESN_1, P_IMSI_C |
-| History group | P_BAN_H, P_SUBSCRIBER_H, P_OLD_IMEI, P_OLD_SIM, P_ESN_SEQ_NO, P_ESN_SEQ_NO1, P_IMSI |
-| P_NEW_IMEI vs P_BAN_H | P_NEW_IMEI count ≥ P_BAN_H count |
-
-If any validation fails, VTS1-specific failures trigger **Oracle remediation** (VTS2 remediation — planned for a later phase).
-
-### 5.4 VTS 1 automated remediation (Oracle → TXT → VTS import)
-
-When pre-check or prep fails for VTS1 columns, the portal:
-
-1. Clears the target VTS1 column(s)
-2. Runs the configured Oracle SQL
-3. Writes a `.txt` file under `exports/vts1_remediate_<timestamp>/`
-4. Imports into VTS1 via `import_csv`
-
-| Trigger | Oracle purpose | TXT file | Header row |
-|---------|----------------|----------|------------|
-| P_BAN low or P_BAN ≠ P_SUBSCRIBER | BAN + subscriber extract (billing_account / subscriber / device / SOC filters) | P_BAN_P_SUBSCRIBER.txt | P_BAN,P_SUBSCRIBER |
-| P_SIM < 8000 | SIM serial inventory query | P_SIM.txt | P_SIM |
-| P_IMEI_IP14128PUR < 8000 | Dealer equipment IMEI extract | P_IMEI_IP14128PUR.txt | P_IMEI_IP14128PUR |
-
-SQL defaults are editable via **Oracle Queries** (stored in `config/oracle_queries.json` after save).
-
-### 5.5 Phase C — Remove old test data (on full prep success)
-
-Clears legacy test columns via `clear_column`:
-
-**VTS 2:** HUP_BAN, Resume_BAN  
-
-**VTS 1:** NAC_BAN, PPC_BAN, TOR_BAN, AdSc_BAN, Cancel_BAN, Cancel_SUB_BAN, SmSw_BAN, BnAt_BAN, BYOD_BAN, AAL_BAN, VSY_BAN
-
-**Completion message:** *Old test data has been removed.*
-
-### 5.6 Supporting actions
-
-| Action | Purpose |
-|--------|---------|
-| **Test Oracle DB** | Validates `.env` + `SELECT 1 FROM DUAL` |
-| **Oracle Queries** | View/edit the three VTS1 remediation SQL scripts |
+If VTS 1 fails → portal tries to fix it automatically (see Step 3), then checks again.
 
 ---
 
-## 6. Task 2 — LG Disk Space Check
+### Step 2 — Validations (data aligned?)
 
-**Purpose:** Confirm adequate free disk on LG (load generator) machines before test execution.
+If pre-check passes, deeper rules run.
 
-**API:** `POST /api/tasks/lg-disk-check/run`
+**VTS 1**
 
-### 6.1 Servers checked
+- P_BAN and P_SUBSCRIBER must have the **same** count.
+- P_SIM must still be ≥ 8,000.
+- P_IMEI_IP14128PUR must still be ≥ 8,000.
 
-| IP | Machine name |
-|----|----------------|
-| 10.61.139.26 | VWRENBPTLRCAP01 |
-| 10.61.139.27 | VWRENBPTLRGAP02 |
-| 10.61.139.28 | VWRENBPTLRGAP03 |
-| 10.61.139.29 | VWRENBPTLRGAP04 |
-| 10.61.139.30 | VWRENBPTLRGAP05 |
-| 10.61.139.31 | VWRENBPTLRGAP06 |
-| 10.61.129.119 | VM0196PTLRG009 |
+**VTS 2**
 
-### 6.2 Checks performed
+- **Current columns** must all match each other:  
+  P_BAN_C, P_NPA_NXX_C, P_SUBSCRIBER_C, P_IMEI_C, P_SIM_C, P_ESN_0, P_ESN_1, P_IMSI_C
+- **History columns** must all match each other:  
+  P_BAN_H, P_SUBSCRIBER_H, P_OLD_IMEI, P_OLD_SIM, P_ESN_SEQ_NO, P_ESN_SEQ_NO1, P_IMSI
+- P_NEW_IMEI count must be ≥ P_BAN_H count.
 
-| Check | Method | Output |
-|-------|--------|--------|
-| C: drive total / free (GB) | Remote WMI (`Win32_LogicalDisk`) via DCOM | Table per server |
-| D: drive total / free (GB) | Same | Table per server |
-| Connectivity / WMI errors | Exception handling | Row marked **Error** with message |
-
-Optional credentials: `LG_WMI_USER`, `LG_WMI_PASSWORD`, `LG_WMI_DOMAIN` in `.env`.
-
-### 6.3 Pass / warn logic
-
-| Condition | UI indication |
-|-----------|----------------|
-| Free space ≥ 50 GB | Green |
-| Free space 15–49 GB | Yellow |
-| Free space < 15 GB | Red |
-| Any C: or D: free **< 20 GB** | Banner: critical warning |
-| WMI failure | Error cells, no disk values |
-
-Operators can open `\\<machine>\<C|D>$` from the UI for manual inspection.
+If VTS 1 validation fails → auto-fix from Oracle (Step 3), then retry.
 
 ---
 
-## 7. Task 3 — Servers Log Space Check
+### Step 3 — Auto-fix VTS 1 (Oracle → file → import)
 
-**Purpose:** Monitor log filesystem usage on TUX, PRAPI, and APILINK hosts; warn before logs fill disks; auto-clean when usage is critical.
+When VTS 1 is short or misaligned, the portal:
 
-**API:** `POST /api/tasks/server-log-check/run`
+1. Connects to Oracle  
+2. Runs the right query  
+3. Saves a `.txt` file  
+4. Clears the old VTS column  
+5. Imports the file into VTS 1  
 
-### 7.1 Server groups
+| Problem | What gets loaded |
+|---------|------------------|
+| P_BAN too low, or P_BAN ≠ P_SUBSCRIBER | P_BAN + P_SUBSCRIBER from billing/subscriber query |
+| P_SIM too low | SIM serial numbers |
+| P_IMEI_IP14128PUR too low | IMEI numbers |
 
-| Group | Hosts (examples) | Usage CGI |
-|-------|------------------|-----------|
-| **TUX** | VLRENBPTCOLAP01, VLRENBPTCOLAP02 | `fetchPetV21FsUsage` |
-| **PRAPI** | VLRENBPTTUXAP01 … TUXAP10 | `fetchPetV21FsUsage` |
-| **APILINK** | LDCPETAPICL01 … APICL08 | `fetchPetAPILinkFsUsage` |
-
-Base URL: `NPE_SERVICES_CGI_BASE` (default `http://npe-services:8888/cgi-bin`).
-
-### 7.2 Checks performed
-
-| Step | Description |
-|------|-------------|
-| Parallel usage fetch | All hosts queried; `fsUsage` parsed as integer % |
-| **Warning threshold** | Usage **> 60%** — logged and highlighted |
-| **Critical threshold** | Usage **> 70%** — triggers automated clean |
-| Fetch errors | Hosts that return HTTP/JSON errors listed separately |
-
-### 7.3 Automated clean (usage > 70%)
-
-For each critical host:
-
-1. Call clean CGI (`cleanPetV21Logs` or `cleanPetAPILinkLogs`) with progressively shorter retention (15 days → 7 → 3.5 → …).
-2. Re-fetch usage after each clean attempt.
-3. Stop when host drops **below 60%**, or clean steps are exhausted.
-
-Activity log and per-host status are shown in the task output.
+You can view or edit these SQL queries using the **Oracle Queries** button.
 
 ---
 
-## 8. Task 4 — Server Bounce
+### Step 4 — Clean up old test columns
 
-**Purpose:** Coordinate TUX server bounce through the official batch portal and track completion via ReqCentral / JIRA.
+When everything passes, old test columns are cleared.
 
-**Behaviour on RUN:** Task moves to **In Progress** (not auto-completed).
+- **VTS 2:** HUP_BAN, Resume_BAN  
+- **VTS 1:** NAC_BAN, PPC_BAN, TOR_BAN, AdSc_BAN, Cancel_BAN, Cancel_SUB_BAN, SmSw_BAN, BnAt_BAN, BYOD_BAN, AAL_BAN, VSY_BAN  
 
-### 8.1 Operator steps
-
-1. Portal opens guidance and link to **NPR batch portal**  
-   `http://nprapw000379.rci.rogers.ca/batch/create`
-2. Operator creates bounce request in NPR (manual).
-3. Enter **JIRA issue key** (e.g. `RNER-197725`) in the portal.
-4. Click **Check status** — backend fetches ReqCentral browse page (`REQCENTRAL_BROWSE_BASE`).
-
-### 8.2 Status checks
-
-| ReqCentral status | Task state |
-|-------------------|------------|
-| **Done** (or equivalent completed) | Task → **Completed** |
-| **In Progress** | Task stays **In Progress** |
-| Invalid key / fetch error | Message shown; operator retries |
-
-### 8.3 Backend bounce probe (secondary)
-
-`POST /api/tasks/server-bounce/run` can SSH to TUX COLAP servers and run configured bounce status command (`TUX_BOUNCE_COMMAND`). Used for optional status listing; primary Task 4 workflow is NPR + JIRA tracking.
-
-MobaXterm may be launched automatically if installed (`MOBAXTERM_PATH`).
+**Done message:** *Old test data has been removed.*
 
 ---
 
-## 9. Task 5 — Server Health Check
+### Extra buttons on Task 1
 
-**Purpose:** Confirm TUX OLN and TUX API (PRAPI) servers report **UP** before testing.
-
-**API:** `POST /api/tasks/server-health-check/run`
-
-### 9.1 Data source
-
-- Fetches **PET1-V21** HTML from NPE CGI  
-  Default: `http://npe-services:8888/cgi-bin/PET1-V21`
-- Parsed server tables: **TUX OLN** (COLAP) and **TUX API** (TUXAP)
-
-### 9.2 Checks performed
-
-| Check | Pass condition |
-|-------|----------------|
-| HTTP reachability | PET1-V21 returns 200 |
-| HTML parse | Server name + status rows extracted |
-| Per-server status | Normalized to **up** / **down** / **unknown** |
-| Overall health | **allUp** when every server is up |
-| Warnings | Any server **down** listed in warnings |
-
-Output: grouped tables (TUX OLN vs TUX API) with colour-coded status.
+| Button | What it does |
+|--------|----------------|
+| **Test Oracle DB** | Checks that Oracle connection works |
+| **Oracle Queries** | View / edit the 3 SQL scripts used for auto-fix |
 
 ---
 
-## 10. Task 6 — Trigger Sanity (placeholder)
+## Task 2 — LG Disk Space Check
 
-**Purpose:** Reserved for post-prep sanity validation.
+**Goal:** Make sure load generator (LG) machines have enough disk space.
 
-**Current state:** Simulated run only — no external system calls. To be replaced with real sanity checks when defined.
+**What it checks**
 
----
+- 7 LG servers (VWRENBPTLRCAP01, GAP02–GAP06, VM0196PTLRG009)
+- Free space on **C:** and **D:** drives (in GB)
 
-## 11. Recommended execution order
+**How results are shown**
 
-Typical PET pre-check sequence:
+| Free space | Meaning |
+|------------|---------|
+| Green (50 GB+) | Good |
+| Yellow (15–49 GB) | Watch it |
+| Red (under 15 GB) | Low |
+| Warning banner | Any drive under **20 GB** free |
 
-| Order | Activity |
-|-------|----------|
-| 1 | HUP Offer Cleanup email (+ JIRA BR per process) |
-| 2 | CRM IGW Bounce email (+ JIRA BR per process) |
-| 3 | **Task 1** — Data Loading |
-| 4 | **Task 2** — LG Disk Space |
-| 5 | **Task 3** — Servers Log Space |
-| 6 | **Task 4** — Server Bounce (await JIRA Done) |
-| 7 | **Task 5** — Server Health Check |
-| 8 | **Task 6** — Trigger Sanity (when implemented) |
+You can click a drive in the table to open the server share for manual check.
 
 ---
 
-## 12. Deployment & Git workflow
+## Task 3 — Servers Log Space Check
 
-| Machine | Action |
-|---------|--------|
-| Developer PC | Edit code → `git commit` → `git push` |
-| VDI | `git pull` → ensure `.env` exists (`setup-env.bat`) → `python app.py` |
+**Goal:** Make sure log folders on app servers are not filling up the disk.
 
-`.env` is **never** pushed to GitHub.
+**Servers checked**
+
+- **TUX** (2 servers)  
+- **PRAPI** (10 servers)  
+- **APILINK** (8 servers)  
+
+**Rules**
+
+| Log disk usage | What happens |
+|----------------|--------------|
+| Over **60%** | Warning shown |
+| Over **70%** | Portal **automatically cleans old logs** |
+| After clean | Re-checks usage; stops when below 60% |
+
+Full activity log is shown in the task output.
 
 ---
 
-## 13. Future enhancements (documented gaps)
+## Task 4 — Server Bounce
 
-| Item | Status |
-|------|--------|
-| JIRA BR auto-create + attach to HUP / CRM emails | Planned |
-| VTS2 Oracle remediation (validation failures) | Planned |
-| Task 6 real sanity checks | Planned |
-| Full JIRA REST integration (create issue from portal) | Planned |
+**Goal:** Bounce TUX servers through the proper change process and wait until JIRA says it’s done.
+
+**This task stays “In Progress” until you finish manually.**
+
+1. Click **RUN** — portal shows a link to the **NPR batch portal** to create the bounce request.  
+2. Submit your bounce in NPR (outside the portal).  
+3. Enter your **JIRA ticket number** (e.g. RNER-197725) in the portal.  
+4. Click **Check status** — portal reads ReqCentral and tells you if the ticket is Done or still In Progress.  
+5. When JIRA is **Done** → task marks **Completed**.
 
 ---
 
-## 14. Document history
+## Task 5 — Server Health Check
 
-| Version | Date | Notes |
-|---------|------|-------|
-| 1.0 | 2026-06-01 | Initial HLD from implemented portal behaviour |
+**Goal:** Confirm TUX servers are **UP** before testing.
+
+**What it does**
+
+- Pulls the **PET1-V21** health page from NPE services  
+- Lists **TUX OLN** and **TUX API** servers with Up / Down status  
+- Warns if any server is down  
+
+---
+
+## Task 6 — Trigger Sanity
+
+**Goal:** Run sanity checks after everything else (placeholder for now).
+
+**Today:** Simulated only — real checks will be added later.
+
+---
+
+## Suggested order to run everything
+
+1. HUP Offer Cleanup (email + JIRA BR)  
+2. CRM IGW Bounce (email + JIRA BR)  
+3. Task 1 — Data Loading  
+4. Task 2 — LG Disk Space  
+5. Task 3 — Servers Log Space  
+6. Task 4 — Server Bounce (wait for JIRA Done)  
+7. Task 5 — Server Health Check  
+8. Task 6 — Trigger Sanity (when ready)  
+
+---
+
+## Setup notes (VDI)
+
+- Passwords and URLs live in a **`.env`** file on the VDI — this file is **not** on GitHub.  
+- After `git pull`, run **`setup-env.bat`** once if `.env` is missing.  
+- Start the portal with **`python app.py`**.
+
+---
+
+## Coming later
+
+- Auto-create JIRA BR and attach to HUP / CRM emails  
+- Auto-fix for VTS 2 validation failures  
+- Real sanity checks in Task 6  
+
+---
+
+*Version 1.1 — simplified for readability*

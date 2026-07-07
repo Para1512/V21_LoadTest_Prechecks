@@ -675,8 +675,8 @@ function renderQueryEditForm(qd, reloadResult) {
     inp.value = val != null ? String(val) : "";
     wrap.appendChild(inp);
   };
-  addField("SKU contains (e.g. IP14128MDN)", "task1-sku", "text", p.skuLike || "IP14128MDN");
-  addField("Memo group HAVING count", "task1-memo", "number", p.memoHavingCount ?? 12);
+  addField("SKU contains (e.g. IP14128STR)", "task1-sku", "text", p.skuLike || "IP14128STR");
+  addField("Memo group HAVING count", "task1-memo", "number", p.memoHavingCount ?? 13);
   addField("SOC", "task1-soc", "text", p.soc || "WBRM422BG");
   addField("sys_creation_date >= (YYYY-MM-DD HH24:MI:SS)", "task1-dt", "text", p.sysCreationDate || "2026-01-20 00:00:01");
   const sqlLabel = document.createElement("div");

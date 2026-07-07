@@ -8,8 +8,8 @@ from typing import Any
 from tasks.oracle_client import connect
 
 DEFAULT_QUERY_PARAMS: dict[str, Any] = {
-    "skuLike": "IP14128MDN",
-    "memoHavingCount": 12,
+    "skuLike": "IP14128STR",
+    "memoHavingCount": 13,
     "soc": "WBRM422BG",
     "sysCreationDate": "2026-01-20 00:00:01",
 }
