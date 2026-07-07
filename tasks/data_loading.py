@@ -138,13 +138,26 @@ def run_vts1_remediation(
             entry["rowCount"] = row_count
             messages.append(f"  Wrote {meta['txtFile']} ({row_count} data rows + header).")
 
-            imp = vts.import_txt(VTS1_URL, txt_path)
-            entry["import"] = {
-                "success": True,
-                "httpStatus": imp.get("httpStatus"),
-                "file": imp.get("file"),
-            }
-            messages.append(f"  VTS import {meta['txtFile']}: Passed")
+            imp = vts.import_txt(VTS1_URL, txt_path, columns=meta["clearColumns"])
+            entry["import"] = imp
+            if not imp.get("success"):
+                entry["message"] = imp.get("message") or "VTS import failed verification."
+                messages.append(f"  FAILED — {entry['message']}")
+                if imp.get("verification"):
+                    for row in imp["verification"].get("rows") or []:
+                        messages.append(
+                            f"    {row.get('column')}: expected {row.get('expected')}, "
+                            f"actual {row.get('actual')}"
+                        )
+                results.append(entry)
+                continue
+            messages.append(
+                f"  VTS import verified — "
+                + ", ".join(
+                    f"{c}={imp.get('expectedCounts', {}).get(c)}"
+                    for c in meta["clearColumns"]
+                )
+            )
             entry["success"] = True
             entry["message"] = f"Imported {row_count} rows into VTS 1."
             messages.append(f"  {entry['message']}")

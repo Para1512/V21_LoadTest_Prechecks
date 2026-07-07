@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -75,8 +76,254 @@ def clear_column_url(base_url: str, colname: str) -> str:
     return f"{vts_api_root(base_url)}/data/clear_column?colname={quote(colname, safe='')}"
 
 
-def import_csv_url(base_url: str) -> str:
-    return f"{vts_api_root(base_url)}/data/import_csv"
+def import_csv_url(base_url: str, colname: str | None = None) -> str:
+    root = f"{vts_api_root(base_url)}/data/import_csv"
+    if colname:
+        return f"{root}?colname={quote(colname, safe='')}"
+    return root
+
+
+def _parse_import_response(response: requests.Response) -> tuple[bool, str, Any]:
+    """Best-effort parse of VTS import response — HTTP 200 alone is not success."""
+    body_text = (response.text or "").strip()
+    detail: Any = body_text[:800] if body_text else None
+    try:
+        detail = response.json()
+    except ValueError:
+        pass
+
+    if not response.ok:
+        return False, f"HTTP {response.status_code}", detail
+
+    if isinstance(detail, dict):
+        if detail.get("success") is False:
+            return False, str(detail.get("error") or detail.get("message") or detail), detail
+        if detail.get("error"):
+            return False, str(detail["error"]), detail
+        if detail.get("success") is True:
+            return True, "response success=true", detail
+
+    lower = body_text.lower()
+    if lower and re.search(r"\b(error|failed|exception|invalid)\b", lower):
+        if not re.search(r"\b0\s+error", lower):
+            return False, body_text[:500], detail
+
+    # Ambiguous HTTP 200 — caller must verify counts on VTS.
+    return True, "HTTP OK (verify counts on VTS)", detail
+
+
+def _write_column_file(path: Path, colname: str, values: list[str], *, include_header: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if include_header:
+        lines.append(colname)
+    lines.extend(v for v in values if v != "")
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n")
+
+
+def _post_import_file(
+    base_url: str,
+    colname: str | None,
+    file_path: Path,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    url = import_csv_url(base_url, colname)
+    with file_path.open("rb") as fh:
+        response = requests.post(
+            url,
+            files={field_name: (file_path.name, fh, "text/csv")},
+            timeout=VTS_REQUEST_TIMEOUT_S * 6,
+        )
+    ok, message, detail = _parse_import_response(response)
+    return {
+        "column": colname,
+        "file": file_path.name,
+        "httpStatus": response.status_code,
+        "success": ok,
+        "message": message,
+        "detail": detail,
+        "strategy": f"colname={colname or 'none'}, field={field_name}, header={'yes' if 'hdr' in file_path.name else 'no'}",
+    }
+
+
+def _try_import_column(
+    base_url: str,
+    colname: str,
+    values: list[str],
+    work_dir: Path,
+    *,
+    expected_count: int,
+) -> dict[str, Any]:
+    """Try several import_csv shapes; VTS usually needs ?colname= and one value per line."""
+    if not values:
+        return {"success": False, "message": "No values to import", "column": colname}
+
+    attempts: list[dict[str, Any]] = []
+    strategies = (
+        (True, "file"),
+        (False, "file"),
+        (True, "csv"),
+        (False, "csv"),
+    )
+    for include_header, field_name in strategies:
+        tag = "hdr" if include_header else "plain"
+        path = work_dir / f"import_{colname}_{tag}_{field_name}.txt"
+        _write_column_file(path, colname, values, include_header=include_header)
+        result = _post_import_file(base_url, colname, path, field_name=field_name)
+        check = verify_column_counts(base_url, {colname: expected_count})
+        row = (check.get("rows") or [{}])[0]
+        result["countCheck"] = row
+        result["verified"] = bool(row.get("passed"))
+        attempts.append(result)
+        if result.get("verified"):
+            result["success"] = True
+            result["attempts"] = attempts
+            return result
+
+    return {
+        "success": False,
+        "column": colname,
+        "message": "Import did not increase VTS column count (tried colname + header/plain variants)",
+        "attempts": attempts,
+    }
+
+
+def read_columns_from_export(path: Path, columns: list[str]) -> dict[str, list[str]]:
+    """Parse combined CSV (header + rows) or single-column file into per-column value lists."""
+    text = path.read_text(encoding="utf-8")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return {col: [] for col in columns}
+
+    out: dict[str, list[str]] = {col: [] for col in columns}
+    start = 0
+    header_parts = [p.strip().upper() for p in lines[0].split(",")]
+    expected = [c.upper() for c in columns]
+
+    if len(columns) > 1 and header_parts[: len(columns)] == expected:
+        start = 1
+        for line in lines[start:]:
+            parts = [p.strip() for p in line.split(",", len(columns) - 1)]
+            if len(parts) < len(columns):
+                continue
+            for col, val in zip(columns, parts):
+                if val:
+                    out[col].append(val)
+        return out
+
+    if len(columns) == 1:
+        col = columns[0]
+        if lines[0].upper() == col.upper():
+            start = 1
+        out[col] = [ln.strip() for ln in lines[start:] if ln.strip()]
+        return out
+
+    # Combined file without matching header — split by comma.
+    for line in lines:
+        parts = [p.strip() for p in line.split(",", len(columns) - 1)]
+        if len(parts) < len(columns):
+            continue
+        for col, val in zip(columns, parts):
+            if val:
+                out[col].append(val)
+    return out
+
+
+def verify_column_counts(
+    base_url: str,
+    expected: dict[str, int],
+    *,
+    tolerance: int = 0,
+) -> dict[str, Any]:
+    """Re-fetch get_page and confirm column counts match expected row counts."""
+    payload = fetch_get_page(base_url)
+    counts = payload.get("countsPerColumn") or {}
+    rows: list[dict[str, Any]] = []
+    all_ok = True
+    for col, need in expected.items():
+        actual = column_count(counts, col)
+        ok = actual is not None and need > 0 and actual == need
+        if not ok:
+            all_ok = False
+        rows.append({"column": col, "expected": need, "actual": actual, "passed": ok})
+    return {"verified": all_ok, "rows": rows, "countsPerColumn": counts}
+
+
+def import_columns(
+    base_url: str,
+    columns: list[str],
+    source_txt: Path | str,
+    *,
+    work_dir: Path | None = None,
+) -> dict[str, Any]:
+    """
+    Import data into VTS — one column at a time via import_csv?colname=.
+    Verifies countsPerColumn after import; fails if counts stay at 0.
+    """
+    path = Path(source_txt)
+    if not path.is_file():
+        raise RuntimeError(f"Import file not found: {path}")
+
+    col_values = read_columns_from_export(path, columns)
+    expected = {col: len(col_values[col]) for col in columns}
+    if sum(expected.values()) == 0:
+        raise RuntimeError(f"No data rows found in {path.name}")
+
+    wd = work_dir or path.parent
+    column_results: list[dict[str, Any]] = []
+    for col in columns:
+        values = col_values[col]
+        if not values:
+            column_results.append(
+                {"success": False, "column": col, "message": "No values for column in export file"}
+            )
+            continue
+        column_results.append(
+            _try_import_column(base_url, col, values, wd, expected_count=len(values))
+        )
+
+    verified = all(r.get("verified") for r in column_results if r.get("column"))
+    http_ok = all(r.get("success") for r in column_results)
+    verify = verify_column_counts(base_url, expected)
+
+    return {
+        "success": http_ok and verified,
+        "verified": verified,
+        "httpOk": http_ok,
+        "columns": columns,
+        "expectedCounts": expected,
+        "columnResults": column_results,
+        "verification": verify,
+        "file": path.name,
+        "message": (
+            "Import verified on VTS"
+            if verified
+            else (
+                "HTTP import returned OK but VTS counts are still wrong (often need import_csv?colname=COLUMN)"
+                if http_ok
+                else "VTS import HTTP/request failed"
+            )
+        ),
+    }
+
+
+def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = None) -> dict[str, Any]:
+    """Import export file; columns inferred from filename or passed explicitly."""
+    path = Path(txt_path)
+    if columns is None:
+        name = path.name.upper()
+        if "P_BAN" in name and "SUBSCRIBER" in name:
+            columns = ["P_BAN", "P_SUBSCRIBER"]
+        elif "P_SIM" in name:
+            columns = ["P_SIM"]
+        elif "IMEI" in name:
+            columns = ["P_IMEI_IP14128PUR"]
+        else:
+            columns = []
+    if not columns:
+        raise RuntimeError(f"Cannot infer VTS columns for import file: {path.name}")
+    return import_columns(base_url, columns, path, work_dir=path.parent)
 
 
 def column_count(counts_per_column: Any, column: str) -> int | None:
@@ -114,35 +361,6 @@ def fetch_get_page(base_url: str) -> dict[str, Any]:
     if not isinstance(counts, dict):
         raise RuntimeError(f"VTS response missing countsPerColumn ({url})")
     return payload
-
-
-def import_txt(base_url: str, txt_path: Path | str) -> dict[str, Any]:
-    """Upload a CSV/TXT file into VTS via import_csv."""
-    path = Path(txt_path)
-    if not path.is_file():
-        raise RuntimeError(f"Import file not found: {path}")
-    url = import_csv_url(base_url)
-    try:
-        with path.open("rb") as fh:
-            response = requests.post(
-                url,
-                files={"file": (path.name, fh, "text/plain")},
-                timeout=VTS_REQUEST_TIMEOUT_S * 6,
-            )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"VTS import failed for {path.name}: {exc}") from exc
-    detail: Any = None
-    try:
-        detail = response.json()
-    except ValueError:
-        detail = (response.text or "").strip()[:500]
-    return {
-        "file": path.name,
-        "httpStatus": response.status_code,
-        "success": True,
-        "detail": detail,
-    }
 
 
 def clear_column(base_url: str, colname: str) -> dict[str, Any]:
