@@ -93,7 +93,12 @@ def _remediate_p_sim_dual(
     proj: Path,
     messages: list[str],
 ) -> dict[str, Any]:
-    """Validation 2: clear P_SIM on VTS1+VTS2, query Oracle, split 10k/40k, import both."""
+    """
+    Validation 2 (VTS 1 & VTS 2 — P_SIM):
+    Trigger: VTS1 P_SIM < 8000 OR VTS2 P_SIM < 5000.
+    Clear P_SIM on both → Oracle (50k rows) → first 10k to VTS2, next 40k to VTS1.
+    Import uses same fileToUpload POST /data/import_csv as Validation 1.
+    """
     entry: dict[str, Any] = {
         "issue": "p_sim",
         "label": oq.QUERY_META["p_sim"]["label"],
@@ -105,27 +110,31 @@ def _remediate_p_sim_dual(
         "imports": [],
     }
     headers = ["P_SIM"]
+    need_total = oq.P_SIM_QUERY_ROW_LIMIT
+    need_vts2 = oq.P_SIM_VTS2_ROW_LIMIT
+    need_vts1 = oq.P_SIM_VTS1_ROW_LIMIT
 
     for url, label in ((VTS1_URL, "VTS 1"), (VTS2_URL, "VTS 2")):
         vts.clear_column(url, "P_SIM")
         entry["clearDetails"].append({"vts": label, "column": "P_SIM", "success": True})
         messages.append(f"  Cleared {label} — P_SIM: Passed")
 
-    messages.append("  Running Oracle P_SIM query …")
+    messages.append("  Running Oracle P_SIM query (rownum <= 50000) …")
     rows, _cols = oq.run_sql(sql)
     messages.append(f"  Query returned {len(rows)} row(s).")
-    if not rows:
-        entry["message"] = "Oracle P_SIM query returned no rows."
+    if len(rows) < need_total:
+        entry["message"] = (
+            f"Oracle P_SIM query returned {len(rows)} rows; expected {need_total}."
+        )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
     vts2_rows_raw, vts1_rows_raw = oq.split_p_sim_rows(rows)
-    if not vts2_rows_raw:
-        entry["message"] = "Not enough rows for VTS 2 (need at least 1; target 10,000)."
-        messages.append(f"  FAILED — {entry['message']}")
-        return entry
-    if not vts1_rows_raw:
-        entry["message"] = "Not enough rows for VTS 1 (need rows 10,001+; target 40,000)."
+    if len(vts2_rows_raw) != need_vts2 or len(vts1_rows_raw) != need_vts1:
+        entry["message"] = (
+            f"Split failed — VTS2 needs {need_vts2}, VTS1 needs {need_vts1}; "
+            f"got {len(vts2_rows_raw)} and {len(vts1_rows_raw)}."
+        )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
@@ -136,13 +145,17 @@ def _remediate_p_sim_dual(
     entry["txtFile"] = f"{vts2_path.name}, {vts1_path.name}"
     entry["rowCount"] = vts2_count + vts1_count
     messages.append(
-        f"  Wrote {vts2_path.name} ({vts2_count} rows) and "
-        f"{vts1_path.name} ({vts1_count} rows)."
+        f"  Wrote {vts2_path.name} ({vts2_count} rows, header P_SIM) for VTS 2."
+    )
+    messages.append(
+        f"  Wrote {vts1_path.name} ({vts1_count} rows, header P_SIM) for VTS 1 "
+        f"(rows 10001–50000, no overlap with VTS 2)."
     )
 
     _, vts2_import_rows = oq.rows_for_vts_import("p_sim", vts2_rows_raw)
     _, vts1_import_rows = oq.rows_for_vts_import("p_sim", vts1_rows_raw)
 
+    messages.append("  Import order: VTS 2 first (10,000), then VTS 1 (40,000).")
     imp2 = _import_vts_data(
         VTS2_URL, "VTS 2", headers, vts2_import_rows, vts2_path, vts2_path.name, messages
     )
@@ -170,20 +183,24 @@ def _remediate_p_sim_dual(
     if ok2 and ok1:
         entry["success"] = True
         entry["message"] = (
-            f"Imported P_SIM — VTS 2: {vts2_count} rows, VTS 1: {vts1_count} rows."
+            f"Validation 2 complete — VTS 2 P_SIM={vts2_count}, "
+            f"VTS 1 P_SIM={vts1_count} (disjoint sets)."
         )
         messages.append(f"  {entry['message']}")
         return entry
 
     entry["message"] = "P_SIM import failed on one or both VTS instances."
     messages.append(f"  FAILED — {entry['message']}")
-    for imp, label, count in ((imp2, "VTS 2", vts2_count), (imp1, "VTS 1", vts1_count)):
+    for imp, label, expected in (
+        (imp2, "VTS 2", need_vts2),
+        (imp1, "VTS 1", need_vts1),
+    ):
         if imp.get("verified"):
             continue
         messages.append(f"    {label}: {imp.get('message') or 'import failed'}")
         for row in (imp.get("verification") or {}).get("rows") or []:
             messages.append(
-                f"      {row.get('column')}: expected {row.get('expected')}, "
+                f"      {row.get('column')}: expected {expected}, "
                 f"actual {row.get('actual')}"
             )
     return entry

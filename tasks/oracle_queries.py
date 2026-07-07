@@ -149,7 +149,11 @@ def run_sql(sql: str) -> tuple[list[tuple[Any, ...]], list[str]]:
 def split_p_sim_rows(
     rows: list[tuple[Any, ...]],
 ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
-    """First 10k rows → VTS 2; next 40k → VTS 1."""
+    """
+    Validation 2 split (non-overlapping):
+    - rows[0:10000]   → VTS 2 (P_SIM header file)
+    - rows[10000:50000] → VTS 1 (P_SIM header file, top 10k removed)
+    """
     vts2 = rows[:P_SIM_VTS2_ROW_LIMIT]
     vts1 = rows[P_SIM_VTS2_ROW_LIMIT : P_SIM_VTS2_ROW_LIMIT + P_SIM_VTS1_ROW_LIMIT]
     return vts2, vts1
