@@ -54,6 +54,8 @@ def remediation_issues(
             issues.append("p_sim")
         if "P_IMEI_IP14128PUR" in vts1_failed:
             issues.append("p_imei_ip14128pur")
+        if "P_BAN_C" in vts2_failed:
+            issues.append("p_ban_c_vts2")
     if prep:
         for v in prep.get("validationDetails") or []:
             if not v.get("passed"):
@@ -63,6 +65,8 @@ def remediation_issues(
                     issues.append("p_sim")
                 elif v.get("id") == "vts1-p_imei_ip14128pur" and "p_imei_ip14128pur" not in issues:
                     issues.append("p_imei_ip14128pur")
+                elif v.get("id") == "vts2-current" and "p_ban_c_vts2" not in issues:
+                    issues.append("p_ban_c_vts2")
     return issues
 
 
@@ -282,6 +286,91 @@ def _remediate_p_imei_ip14128pur(
     return entry
 
 
+def _remediate_p_ban_c_vts2(
+    sql: str,
+    out_dir: Path,
+    proj: Path,
+    messages: list[str],
+) -> dict[str, Any]:
+    """
+    Validation 4 (VTS 2 — P_BAN_C & current columns):
+    Trigger: P_BAN_C < 1000 OR current column counts not aligned with P_BAN_C.
+    Clear 8 columns → Oracle query → combined TXT → VTS2 import (fileToUpload).
+    """
+    meta = oq.QUERY_META["p_ban_c_vts2"]
+    columns = list(meta["clearColumns"])
+    entry: dict[str, Any] = {
+        "issue": "p_ban_c_vts2",
+        "label": meta["label"],
+        "success": False,
+        "clearDetails": [],
+        "txtFile": None,
+        "rowCount": 0,
+        "import": None,
+    }
+
+    for col in columns:
+        vts.clear_column(VTS2_URL, col)
+        entry["clearDetails"].append({"vts": "VTS 2", "column": col, "success": True})
+        messages.append(f"  Cleared VTS 2 — {col}: Passed")
+
+    messages.append("  Running Oracle P_BAN_C (current) query …")
+    rows, _cols = oq.run_sql(sql)
+    messages.append(f"  Query returned {len(rows)} row(s).")
+    if not rows:
+        entry["message"] = "Oracle P_BAN_C query returned no rows."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    headers, vts_rows = oq.rows_for_vts_import("p_ban_c_vts2", rows)
+    if not vts_rows:
+        entry["message"] = "Could not parse query rows into 8 VTS columns."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    txt_path = out_dir / meta["txtFile"]
+    row_count = oq.write_remediation_txt(txt_path, "p_ban_c_vts2", rows, _cols)
+    if row_count != len(vts_rows):
+        row_count = len(vts_rows)
+    entry["txtFile"] = str(txt_path.relative_to(proj))
+    entry["rowCount"] = row_count
+    messages.append(
+        f"  Wrote {meta['txtFile']} ({row_count} data rows + header "
+        f"{','.join(headers)})."
+    )
+
+    imp = _import_vts_data(
+        VTS2_URL,
+        "VTS 2",
+        headers,
+        vts_rows,
+        txt_path,
+        meta["txtFile"],
+        messages,
+    )
+    entry["import"] = imp
+    if not imp.get("verified"):
+        entry["message"] = imp.get("message") or "VTS import failed verification."
+        messages.append(f"  FAILED — {entry['message']}")
+        upload = imp.get("upload") or {}
+        if upload.get("responseBody"):
+            messages.append(f"    VTS response: {upload['responseBody'][:200]}")
+        for row in (imp.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"    {row.get('column')}: expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+        return entry
+
+    entry["success"] = True
+    entry["message"] = (
+        f"Validation 4 complete — imported {row_count} rows into VTS 2 "
+        f"({len(columns)} aligned columns)."
+    )
+    messages.append(f"  {entry['message']}")
+    return entry
+
+
 def run_vts1_remediation(
     issues: list[str] | None = None,
     *,
@@ -358,6 +447,32 @@ def run_vts1_remediation(
                 continue
             try:
                 entry = _remediate_p_imei_ip14128pur(sql, out_dir, proj, messages)
+            except Exception as exc:
+                entry = {
+                    "issue": issue_key,
+                    "label": meta["label"],
+                    "success": False,
+                    "message": str(exc),
+                }
+                messages.append(f"  FAILED — {exc}")
+            results.append(entry)
+            continue
+
+        if issue_key == "p_ban_c_vts2":
+            messages.append(f"--- {meta['label']} ---")
+            if not sql:
+                results.append(
+                    {
+                        "issue": issue_key,
+                        "label": meta["label"],
+                        "success": False,
+                        "message": "SQL query is empty.",
+                    }
+                )
+                messages.append("  FAILED — SQL query is empty.")
+                continue
+            try:
+                entry = _remediate_p_ban_c_vts2(sql, out_dir, proj, messages)
             except Exception as exc:
                 entry = {
                     "issue": issue_key,

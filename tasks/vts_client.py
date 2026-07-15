@@ -578,6 +578,8 @@ def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = 
         name = path.name.upper()
         if "P_BAN" in name and "SUBSCRIBER" in name:
             columns = ["P_BAN", "P_SUBSCRIBER"]
+        elif "P_BAN_C" in name:
+            columns = list(VTS2_ALIGN_GROUP_C)
         elif "P_SIM" in name:
             columns = ["P_SIM"]
         elif "IMEI" in name:

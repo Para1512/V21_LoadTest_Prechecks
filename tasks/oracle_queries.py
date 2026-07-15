@@ -39,7 +39,44 @@ DEFAULT_P_IMEI_SQL = (
 
 P_IMEI_QUERY_ROW_LIMIT = 20000
 
-QUERY_KEYS = ("ban_subscriber", "p_sim", "p_imei_ip14128pur")
+DEFAULT_P_BAN_C_VTS2_SQL = (
+    "SELECT "
+    "a.ban || ',' || REPLACE(SUBSTR(b.subscriber_no, 1, 6), ' ', '') || ',' || b.subscriber_no || ',' || "
+    "(SELECT LISTAGG(c.unit_esn, ',') WITHIN GROUP (ORDER BY c.unit_esn) "
+    "FROM physical_device c WHERE c.customer_id = a.customer_id) || ',' || "
+    "(SELECT LISTAGG(c.esn_seq_no, ',') WITHIN GROUP (ORDER BY c.esn_seq_no) "
+    "FROM physical_device c WHERE c.customer_id = a.customer_id) || ',' || "
+    "(SELECT LISTAGG(c.imsi, ',') WITHIN GROUP (ORDER BY c.imsi) "
+    "FROM physical_device c WHERE c.customer_id = a.customer_id) "
+    "FROM billing_account a "
+    "JOIN subscriber b ON a.customer_id = b.customer_id "
+    "WHERE a.ban_status = 'N' "
+    "AND a.account_type = 'I' "
+    "AND a.account_sub_type = 'R' "
+    "AND b.product_type = 'C' "
+    "AND b.sub_status = 'C' "
+    "AND b.sub_status_last_act = 'CAN' "
+    "AND a.sys_update_date >= TO_DATE('2026-07-09 00:00:01', 'YYYY-MM-DD HH24:MI:SS') "
+    "AND EXISTS ("
+    "SELECT 1 FROM physical_device c "
+    "WHERE c.customer_id = a.customer_id AND c.sku LIKE '%IP14128STR%') "
+    "AND (SELECT COUNT(DISTINCT c.unit_esn) FROM physical_device c "
+    "WHERE c.customer_id = a.customer_id) = 2 "
+    "ORDER BY a.sys_update_date ASC"
+)
+
+P_BAN_C_VTS2_COLUMNS = [
+    "P_BAN_C",
+    "P_NPA_NXX_C",
+    "P_SUBSCRIBER_C",
+    "P_IMEI_C",
+    "P_SIM_C",
+    "P_ESN_0",
+    "P_ESN_1",
+    "P_IMSI_C",
+]
+
+QUERY_KEYS = ("ban_subscriber", "p_sim", "p_imei_ip14128pur", "p_ban_c_vts2")
 
 QUERY_META: dict[str, dict[str, Any]] = {
     "ban_subscriber": {
@@ -69,6 +106,14 @@ QUERY_META: dict[str, dict[str, Any]] = {
         "headers": ["P_IMEI_IP14128PUR"],
         "queryRowLimit": P_IMEI_QUERY_ROW_LIMIT,
     },
+    "p_ban_c_vts2": {
+        "id": "p_ban_c_vts2",
+        "label": "VTS 2 — P_BAN_C & current columns (Validation 4)",
+        "clearColumns": P_BAN_C_VTS2_COLUMNS,
+        "txtFile": "P_BAN_C_VTS2.txt",
+        "headers": P_BAN_C_VTS2_COLUMNS,
+        "vts": "VTS 2",
+    },
 }
 
 
@@ -77,6 +122,7 @@ def default_queries() -> dict[str, str]:
         "ban_subscriber": ora.build_main_query_sql(ora.DEFAULT_QUERY_PARAMS),
         "p_sim": DEFAULT_P_SIM_SQL,
         "p_imei_ip14128pur": DEFAULT_P_IMEI_SQL,
+        "p_ban_c_vts2": DEFAULT_P_BAN_C_VTS2_SQL,
     }
 
 
@@ -173,6 +219,21 @@ def write_p_sim_column_txt(path: Path, rows: list[tuple[Any, ...]]) -> int:
     return max(0, len(lines) - 1)
 
 
+def parse_p_ban_c_query_row(row: tuple[Any, ...]) -> tuple[str, ...] | None:
+    """
+    Parse Oracle row into 8 VTS2 current columns.
+    Query returns one concatenated CSV row (ban,npa,subscriber,2x unit_esn,2x esn_seq,imsi).
+    """
+    if len(row) >= len(P_BAN_C_VTS2_COLUMNS):
+        return tuple(str(row[i] or "").strip() for i in range(len(P_BAN_C_VTS2_COLUMNS)))
+    if len(row) >= 1:
+        cell = str(row[0] or "").strip()
+        parts = [p.strip() for p in cell.split(",")]
+        if len(parts) >= len(P_BAN_C_VTS2_COLUMNS):
+            return tuple(parts[: len(P_BAN_C_VTS2_COLUMNS)])
+    return None
+
+
 def rows_for_vts_import(
     issue_key: str,
     rows: list[tuple[Any, ...]],
@@ -192,6 +253,10 @@ def rows_for_vts_import(
             out.append((str(row[0] or "").strip(),))
         elif issue_key == "p_imei_ip14128pur":
             out.append((str(row[0] or "").strip(),))
+        elif issue_key == "p_ban_c_vts2":
+            parsed = parse_p_ban_c_query_row(row)
+            if parsed:
+                out.append(parsed)
         else:
             out.append(tuple(str(row[i] if i < len(row) else "") for i in range(len(headers))))
     return headers, out
@@ -219,6 +284,12 @@ def write_remediation_txt(
             lines.append(f"{str(row[0] or '').strip()}")
         elif issue_key == "p_imei_ip14128pur":
             lines.append(f"{str(row[0] or '').strip()}")
+        elif issue_key == "p_ban_c_vts2":
+            parsed = parse_p_ban_c_query_row(row)
+            if parsed:
+                lines.append(",".join(parsed))
+                count += 1
+            continue
         else:
             vals = [str(row[i] if i < len(row) else "") for i in range(len(headers))]
             lines.append(",".join(vals))
