@@ -42,11 +42,11 @@ P_IMEI_QUERY_ROW_LIMIT = 20000
 DEFAULT_P_BAN_C_VTS2_SQL = (
     "SELECT "
     "a.ban || ',' || REPLACE(SUBSTR(b.subscriber_no, 1, 6), ' ', '') || ',' || b.subscriber_no || ',' || "
-    "(SELECT LISTAGG(c.unit_esn, ',') WITHIN GROUP (ORDER BY c.unit_esn) "
+    "(SELECT LISTAGG(REPLACE(c.unit_esn, ' ', ''), ',') WITHIN GROUP (ORDER BY c.unit_esn) "
     "FROM physical_device c WHERE c.customer_id = a.customer_id) || ',' || "
-    "(SELECT LISTAGG(c.esn_seq_no, ',') WITHIN GROUP (ORDER BY c.esn_seq_no) "
+    "(SELECT LISTAGG(REPLACE(c.esn_seq_no, ' ', ''), ',') WITHIN GROUP (ORDER BY c.esn_seq_no) "
     "FROM physical_device c WHERE c.customer_id = a.customer_id) || ',' || "
-    "(SELECT LISTAGG(c.imsi, ',') WITHIN GROUP (ORDER BY c.imsi) "
+    "(SELECT LISTAGG(REPLACE(c.imsi, ' ', ''), ',') WITHIN GROUP (ORDER BY c.imsi) "
     "FROM physical_device c WHERE c.customer_id = a.customer_id) "
     "FROM billing_account a "
     "JOIN subscriber b ON a.customer_id = b.customer_id "
@@ -91,12 +91,45 @@ DEFAULT_P_NEW_IMEI_VTS2_SQL = (
 
 P_NEW_IMEI_VTS2_ROW_LIMIT = 4000
 
+P_BAN_H_VTS2_COLUMNS = [
+    "P_BAN_H",
+    "P_SUBSCRIBER_H",
+    "P_OLD_IMEI",
+    "P_OLD_SIM",
+    "P_ESN_SEQ_NO",
+    "P_ESN_SEQ_NO1",
+    "P_IMSI",
+]
+
+P_BAN_H_VTS2_BATCH_SIZE = 1000
+P_BAN_H_VTS2_TOTAL = 3000
+P_BAN_H_VTS2_BATCHES = 3
+P_BAN_H_BAN_LIST_PLACEHOLDER = "{BAN_LIST}"
+
+DEFAULT_P_BAN_H_VTS2_SQL = (
+    "SELECT DISTINCT(a.ban || ',' || b.subscriber_no || ',' || "
+    "(SELECT LISTAGG(DISTINCT REPLACE(c.unit_esn, ' ', ''), ',') "
+    "WITHIN GROUP (ORDER BY c.unit_esn) FROM physical_device c "
+    "WHERE c.customer_id = a.customer_id) || ',' || "
+    "(SELECT LISTAGG(DISTINCT REPLACE(c.esn_seq_no, ' ', ''), ',') "
+    "WITHIN GROUP (ORDER BY c.esn_seq_no) FROM physical_device c "
+    "WHERE c.customer_id = a.customer_id) || ',' || "
+    "(SELECT LISTAGG(DISTINCT REPLACE(c.imsi, ' ', ''), ',') "
+    "WITHIN GROUP (ORDER BY c.imsi) FROM physical_device c "
+    "WHERE c.customer_id = a.customer_id)) "
+    "FROM billing_account a "
+    "JOIN subscriber b ON a.customer_id = b.customer_id "
+    "JOIN service_agreement d ON d.ban = a.customer_id "
+    f"WHERE a.customer_id IN ({P_BAN_H_BAN_LIST_PLACEHOLDER})"
+)
+
 QUERY_KEYS = (
     "ban_subscriber",
     "p_sim",
     "p_imei_ip14128pur",
     "p_ban_c_vts2",
     "p_new_imei_vts2",
+    "p_ban_h_vts2",
 )
 
 QUERY_META: dict[str, dict[str, Any]] = {
@@ -144,6 +177,19 @@ QUERY_META: dict[str, dict[str, Any]] = {
         "vts": "VTS 2",
         "queryRowLimit": P_NEW_IMEI_VTS2_ROW_LIMIT,
     },
+    "p_ban_h_vts2": {
+        "id": "p_ban_h_vts2",
+        "label": "VTS 2 — P_BAN_H & history columns (Validation 6)",
+        "clearColumns": P_BAN_H_VTS2_COLUMNS,
+        "txtFile": "P_BAN_H_VTS2.txt",
+        "headers": P_BAN_H_VTS2_COLUMNS,
+        "vts": "VTS 2",
+        "batchSize": P_BAN_H_VTS2_BATCH_SIZE,
+        "totalRows": P_BAN_H_VTS2_TOTAL,
+        "batches": P_BAN_H_VTS2_BATCHES,
+        "sourceColumn": "P_BAN",
+        "sourceVts": "VTS 1",
+    },
 }
 
 
@@ -154,6 +200,7 @@ def default_queries() -> dict[str, str]:
         "p_imei_ip14128pur": DEFAULT_P_IMEI_SQL,
         "p_ban_c_vts2": DEFAULT_P_BAN_C_VTS2_SQL,
         "p_new_imei_vts2": DEFAULT_P_NEW_IMEI_VTS2_SQL,
+        "p_ban_h_vts2": DEFAULT_P_BAN_H_VTS2_SQL,
     }
 
 
@@ -250,19 +297,98 @@ def write_p_sim_column_txt(path: Path, rows: list[tuple[Any, ...]]) -> int:
     return max(0, len(lines) - 1)
 
 
+def _normalize_p_ban_c_field(column: str, value: str) -> str:
+    """Strip padding; device columns (IMEI/SIM/ESN/IMSI) must not contain spaces."""
+    text = (value or "").strip()
+    if column in ("P_IMEI_C", "P_SIM_C", "P_ESN_0", "P_ESN_1", "P_IMSI_C"):
+        text = text.replace(" ", "")
+    return text
+
+
+def _normalize_p_ban_h_field(column: str, value: str) -> str:
+    """Strip padding; device columns must not contain spaces."""
+    text = (value or "").strip()
+    if column in (
+        "P_OLD_IMEI",
+        "P_OLD_SIM",
+        "P_ESN_SEQ_NO",
+        "P_ESN_SEQ_NO1",
+        "P_IMSI",
+    ):
+        text = text.replace(" ", "")
+    return text
+
+
+def build_ban_in_clause(bans: list[str]) -> str:
+    quoted: list[str] = []
+    for ban in bans:
+        text = str(ban or "").strip()
+        if not text:
+            continue
+        quoted.append("'" + text.replace("'", "''") + "'")
+    if not quoted:
+        raise ValueError("BAN list is empty.")
+    return ",".join(quoted)
+
+
+def build_p_ban_h_sql(template: str, bans: list[str]) -> str:
+    sql = (template or "").strip()
+    if not sql:
+        raise ValueError("P_BAN_H SQL template is empty.")
+    clause = build_ban_in_clause(bans)
+    if P_BAN_H_BAN_LIST_PLACEHOLDER in sql:
+        return sql.replace(P_BAN_H_BAN_LIST_PLACEHOLDER, clause)
+    if "'BAN1'" in sql or "'BAN2'" in sql:
+        start = sql.upper().find(" IN (")
+        if start >= 0:
+            end = sql.find(")", start)
+            if end > start:
+                return sql[: start + 4] + clause + sql[end:]
+    raise ValueError(
+        f"P_BAN_H SQL must include {P_BAN_H_BAN_LIST_PLACEHOLDER} in the IN clause."
+    )
+
+
+def parse_p_ban_h_query_row(row: tuple[Any, ...]) -> tuple[str, ...] | None:
+    """
+    Parse Oracle row into 7 VTS2 history columns.
+    Query returns one concatenated CSV row (ban,subscriber,2x unit_esn,2x esn_seq,imsi).
+    """
+    raw: tuple[str, ...] | None = None
+    if len(row) >= len(P_BAN_H_VTS2_COLUMNS):
+        raw = tuple(str(row[i] or "").strip() for i in range(len(P_BAN_H_VTS2_COLUMNS)))
+    elif len(row) >= 1:
+        cell = str(row[0] or "").strip()
+        parts = [p.strip() for p in cell.split(",")]
+        if len(parts) >= len(P_BAN_H_VTS2_COLUMNS):
+            raw = tuple(parts[: len(P_BAN_H_VTS2_COLUMNS)])
+    if raw is None:
+        return None
+    return tuple(
+        _normalize_p_ban_h_field(col, val)
+        for col, val in zip(P_BAN_H_VTS2_COLUMNS, raw)
+    )
+
+
 def parse_p_ban_c_query_row(row: tuple[Any, ...]) -> tuple[str, ...] | None:
     """
     Parse Oracle row into 8 VTS2 current columns.
     Query returns one concatenated CSV row (ban,npa,subscriber,2x unit_esn,2x esn_seq,imsi).
     """
+    raw: tuple[str, ...] | None = None
     if len(row) >= len(P_BAN_C_VTS2_COLUMNS):
-        return tuple(str(row[i] or "").strip() for i in range(len(P_BAN_C_VTS2_COLUMNS)))
-    if len(row) >= 1:
+        raw = tuple(str(row[i] or "").strip() for i in range(len(P_BAN_C_VTS2_COLUMNS)))
+    elif len(row) >= 1:
         cell = str(row[0] or "").strip()
         parts = [p.strip() for p in cell.split(",")]
         if len(parts) >= len(P_BAN_C_VTS2_COLUMNS):
-            return tuple(parts[: len(P_BAN_C_VTS2_COLUMNS)])
-    return None
+            raw = tuple(parts[: len(P_BAN_C_VTS2_COLUMNS)])
+    if raw is None:
+        return None
+    return tuple(
+        _normalize_p_ban_c_field(col, val)
+        for col, val in zip(P_BAN_C_VTS2_COLUMNS, raw)
+    )
 
 
 def rows_for_vts_import(
@@ -286,6 +412,10 @@ def rows_for_vts_import(
             out.append((str(row[0] or "").strip(),))
         elif issue_key == "p_ban_c_vts2":
             parsed = parse_p_ban_c_query_row(row)
+            if parsed:
+                out.append(parsed)
+        elif issue_key == "p_ban_h_vts2":
+            parsed = parse_p_ban_h_query_row(row)
             if parsed:
                 out.append(parsed)
         elif issue_key == "p_new_imei_vts2":
@@ -319,6 +449,12 @@ def write_remediation_txt(
             lines.append(f"{str(row[0] or '').strip()}")
         elif issue_key == "p_ban_c_vts2":
             parsed = parse_p_ban_c_query_row(row)
+            if parsed:
+                lines.append(",".join(parsed))
+                count += 1
+            continue
+        elif issue_key == "p_ban_h_vts2":
+            parsed = parse_p_ban_h_query_row(row)
             if parsed:
                 lines.append(",".join(parsed))
                 count += 1

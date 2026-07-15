@@ -110,6 +110,20 @@ def main() -> int:
             print(line)
         return 0 if entry.get("success") else 1
 
+    if args.query == "p_ban_h_vts2":
+        sql = oq.load_queries().get("p_ban_h_vts2", "").strip()
+        if not sql:
+            print("No SQL for p_ban_h_vts2")
+            return 1
+        from tasks import data_loading as dl
+
+        out_dir = ROOT / "exports" / "cli_p_ban_h_import"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        entry = dl._remediate_p_ban_h_vts2(sql, out_dir, ROOT, messages := [])
+        for line in messages:
+            print(line)
+        return 0 if entry.get("success") else 1
+
     meta = oq.QUERY_META[args.query]
     sql = oq.load_queries().get(args.query, "").strip()
     if not sql:

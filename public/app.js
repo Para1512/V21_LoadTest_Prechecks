@@ -1659,7 +1659,7 @@ async function openOracleQueriesEditor() {
   const hint = document.createElement("p");
   hint.className = "oracle-queries-hint";
   hint.textContent =
-    "Edit SQL used when VTS 1 validation fails. Update saves for future runs; Cancel discards changes.";
+    "Edit SQL used when VTS validation fails. P_BAN_H query must keep {BAN_LIST} placeholder for batch IN clause.";
   panel.appendChild(hint);
   const form = document.createElement("div");
   form.className = "oracle-queries-form";

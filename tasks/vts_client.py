@@ -26,7 +26,7 @@ VTS1_MIN_COUNTS: dict[str, int] = {
 
 VTS2_MIN_COUNTS: dict[str, int] = {
     "P_BAN_C": 1000,
-    "P_BAN_H": 1000,
+    "P_BAN_H": 2000,
     "P_SIM": 5000,
     "P_NEW_IMEI": 1500,
 }
@@ -79,6 +79,17 @@ def vts_api_root(base_url: str) -> str:
 
 def get_page_url(base_url: str) -> str:
     return f"{vts_api_root(base_url)}/data/get_page?rows=0&page=1"
+
+
+def get_page_data_url(base_url: str, *, rows: int, page: int) -> str:
+    return f"{vts_api_root(base_url)}/data/get_page?rows={max(1, rows)}&page={max(1, page)}"
+
+
+def export_column_url(base_url: str, colname: str) -> str:
+    return (
+        f"{vts_api_root(base_url)}/data/export_column"
+        f"?colname={quote(colname, safe='')}"
+    )
 
 
 def clear_column_url(base_url: str, colname: str) -> str:
@@ -579,6 +590,8 @@ def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = 
         name = path.name.upper()
         if "P_BAN" in name and "SUBSCRIBER" in name:
             columns = ["P_BAN", "P_SUBSCRIBER"]
+        elif "P_BAN_H" in name:
+            columns = list(VTS2_ALIGN_GROUP_H)
         elif "P_BAN_C" in name:
             columns = list(VTS2_ALIGN_GROUP_C)
         elif "P_NEW_IMEI" in name:
@@ -655,7 +668,20 @@ def column_count(counts_per_column: Any, column: str) -> int | None:
 
 
 def fetch_get_page(base_url: str) -> dict[str, Any]:
-    url = get_page_url(base_url)
+    return _fetch_get_page_payload(base_url, get_page_url(base_url))
+
+
+def fetch_get_page_rows(
+    base_url: str,
+    *,
+    rows: int,
+    page: int = 1,
+) -> dict[str, Any]:
+    url = get_page_data_url(base_url, rows=rows, page=page)
+    return _fetch_get_page_payload(base_url, url)
+
+
+def _fetch_get_page_payload(base_url: str, url: str) -> dict[str, Any]:
     try:
         response = requests.get(url, timeout=VTS_REQUEST_TIMEOUT_S)
         response.raise_for_status()
@@ -671,6 +697,187 @@ def fetch_get_page(base_url: str) -> dict[str, Any]:
     if not isinstance(counts, dict):
         raise RuntimeError(f"VTS response missing countsPerColumn ({url})")
     return payload
+
+
+def _column_names_from_payload(payload: dict[str, Any]) -> list[str]:
+    for key in ("columns", "columnNames", "column_names", "headers"):
+        raw = payload.get(key)
+        if isinstance(raw, list) and raw:
+            return [str(c).strip() for c in raw]
+    table = payload.get("table")
+    if isinstance(table, dict):
+        for key in ("columns", "columnNames"):
+            raw = table.get(key)
+            if isinstance(raw, list) and raw:
+                return [str(c).strip() for c in raw]
+    return []
+
+
+def _match_column_index(column_names: list[str], column: str) -> int | None:
+    target = column.upper()
+    for idx, name in enumerate(column_names):
+        if str(name).upper() == target:
+            return idx
+    return None
+
+
+def _values_from_row_record(record: Any, column: str, col_idx: int | None) -> str | None:
+    if isinstance(record, dict):
+        for key, val in record.items():
+            if str(key).upper() == column.upper():
+                text = str(val or "").strip()
+                return text or None
+        if col_idx is not None:
+            keys = list(record.keys())
+            if 0 <= col_idx < len(keys):
+                text = str(record.get(keys[col_idx]) or "").strip()
+                return text or None
+    if isinstance(record, (list, tuple)) and col_idx is not None:
+        if 0 <= col_idx < len(record):
+            text = str(record[col_idx] or "").strip()
+            return text or None
+    if isinstance(record, str):
+        text = record.strip()
+        return text or None
+    return None
+
+
+def _extract_column_values_from_payload(
+    payload: dict[str, Any],
+    column: str,
+) -> list[str]:
+    values: list[str] = []
+    column_names = _column_names_from_payload(payload)
+    col_idx = _match_column_index(column_names, column) if column_names else None
+
+    for key in ("columnData", "columnsData", "dataPerColumn"):
+        raw = payload.get(key)
+        if isinstance(raw, dict):
+            for col_key, col_vals in raw.items():
+                if str(col_key).upper() != column.upper():
+                    continue
+                if isinstance(col_vals, list):
+                    for val in col_vals:
+                        text = str(val or "").strip()
+                        if text:
+                            values.append(text)
+                    return values
+
+    row_sources: list[Any] = []
+    for key in ("rows", "data", "pageData", "items"):
+        raw = payload.get(key)
+        if isinstance(raw, list) and raw:
+            row_sources.append(raw)
+    table = payload.get("table")
+    if isinstance(table, dict):
+        for key in ("rows", "data"):
+            raw = table.get(key)
+            if isinstance(raw, list) and raw:
+                row_sources.append(raw)
+
+    for rows in row_sources:
+        for record in rows:
+            val = _values_from_row_record(record, column, col_idx)
+            if val:
+                values.append(val)
+        if values:
+            return values
+
+    if col_idx is not None:
+        for key in ("columns", "columnValues"):
+            raw = payload.get(key)
+            if isinstance(raw, list) and len(raw) > col_idx:
+                col_vals = raw[col_idx]
+                if isinstance(col_vals, list):
+                    for val in col_vals:
+                        text = str(val or "").strip()
+                        if text:
+                            values.append(text)
+                    return values
+    return values
+
+
+def _parse_export_column_text(text: str) -> list[str]:
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    if len(lines) > 1 and lines[0].upper() == lines[0] and "," not in lines[0]:
+        lines = lines[1:]
+    out: list[str] = []
+    for line in lines:
+        if "," in line:
+            out.append(line.split(",", 1)[0].strip())
+        else:
+            out.append(line)
+    return [v for v in out if v]
+
+
+def fetch_column_values(base_url: str, column: str) -> list[str]:
+    """Read all values from a VTS column (export_column, then paginated get_page)."""
+    export_url = export_column_url(base_url, column)
+    try:
+        response = requests.get(export_url, timeout=VTS_REQUEST_TIMEOUT_S)
+        if response.ok and (response.text or "").strip():
+            values = _parse_export_column_text(response.text)
+            if values:
+                return values
+    except requests.RequestException:
+        pass
+
+    payload = fetch_get_page(base_url)
+    expected = column_count(payload.get("countsPerColumn") or {}, column)
+    if expected is None or expected <= 0:
+        return []
+
+    page_size = 1000
+    collected: list[str] = []
+    page = 1
+    max_pages = max(1, (expected + page_size - 1) // page_size) + 2
+    while page <= max_pages and len(collected) < expected:
+        page_payload = fetch_get_page_rows(base_url, rows=page_size, page=page)
+        chunk = _extract_column_values_from_payload(page_payload, column)
+        if not chunk:
+            break
+        collected.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        page += 1
+
+    if collected:
+        return collected[:expected]
+
+    single = fetch_get_page_rows(base_url, rows=expected, page=1)
+    chunk = _extract_column_values_from_payload(single, column)
+    if chunk:
+        return chunk[:expected]
+    raise RuntimeError(
+        f"Could not read {column} values from VTS — export_column and get_page returned no data."
+    )
+
+
+def replace_column_values(
+    base_url: str,
+    column: str,
+    values: list[str],
+    *,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Clear a column and re-import the provided values (single-column TXT)."""
+    clear_column(base_url, column)
+    cleaned = [str(v or "").strip() for v in values if str(v or "").strip()]
+    if not cleaned:
+        verify = verify_column_counts(base_url, {column: 0})
+        return {
+            "success": True,
+            "verified": bool(verify.get("verified")),
+            "columns": [column],
+            "expectedCounts": {column: 0},
+            "message": f"{column} cleared (no values to re-import).",
+            "verification": verify,
+        }
+    content = build_csv_bytes([column], [(v,) for v in cleaned])
+    upload_name = filename or f"{column}.txt"
+    return import_csv_bytes(base_url, content, upload_name, [column], colname=column)
 
 
 def clear_column(base_url: str, colname: str) -> dict[str, Any]:

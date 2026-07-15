@@ -56,6 +56,8 @@ def remediation_issues(
             issues.append("p_imei_ip14128pur")
         if "P_BAN_C" in vts2_failed:
             issues.append("p_ban_c_vts2")
+        if "P_BAN_H" in vts2_failed:
+            issues.append("p_ban_h_vts2")
         if "P_NEW_IMEI" in vts2_failed:
             issues.append("p_new_imei_vts2")
     if prep:
@@ -69,6 +71,8 @@ def remediation_issues(
                     issues.append("p_imei_ip14128pur")
                 elif v.get("id") == "vts2-current" and "p_ban_c_vts2" not in issues:
                     issues.append("p_ban_c_vts2")
+                elif v.get("id") == "vts2-history" and "p_ban_h_vts2" not in issues:
+                    issues.append("p_ban_h_vts2")
                 elif v.get("id") == "vts2-p_new_imei" and "p_new_imei_vts2" not in issues:
                     issues.append("p_new_imei_vts2")
     return issues
@@ -450,6 +454,152 @@ def _remediate_p_new_imei_vts2(
     return entry
 
 
+def _remediate_p_ban_h_vts2(
+    sql_template: str,
+    out_dir: Path,
+    proj: Path,
+    messages: list[str],
+) -> dict[str, Any]:
+    """
+    Validation 6 (VTS 2 — P_BAN_H & history columns):
+    Trigger: P_BAN_H < 2000 OR history column counts not aligned.
+    Clear 7 columns → read last 3000 P_BAN from VTS1 (3x1000 Oracle batches)
+    → combined TXT → VTS2 import → remove consumed 3000 from VTS1 P_BAN.
+    """
+    meta = oq.QUERY_META["p_ban_h_vts2"]
+    columns = list(meta["clearColumns"])
+    need_total = oq.P_BAN_H_VTS2_TOTAL
+    batch_size = oq.P_BAN_H_VTS2_BATCH_SIZE
+    entry: dict[str, Any] = {
+        "issue": "p_ban_h_vts2",
+        "label": meta["label"],
+        "success": False,
+        "clearDetails": [],
+        "txtFile": None,
+        "rowCount": 0,
+        "import": None,
+        "batches": [],
+        "pBanTrim": None,
+    }
+
+    for col in columns:
+        vts.clear_column(VTS2_URL, col)
+        entry["clearDetails"].append({"vts": "VTS 2", "column": col, "success": True})
+        messages.append(f"  Cleared VTS 2 — {col}: Passed")
+
+    messages.append("  Reading P_BAN values from VTS 1 …")
+    p_ban_values = vts.fetch_column_values(VTS1_URL, "P_BAN")
+    messages.append(f"  VTS 1 P_BAN count: {len(p_ban_values)}.")
+    if len(p_ban_values) < need_total:
+        entry["message"] = (
+            f"VTS 1 P_BAN has {len(p_ban_values)} values; need at least {need_total}."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    consumed_bans = p_ban_values[-need_total:]
+    remaining_bans = p_ban_values[:-need_total]
+    messages.append(
+        f"  Using last {need_total} P_BAN values for Oracle "
+        f"({batch_size} per batch x {oq.P_BAN_H_VTS2_BATCHES})."
+    )
+
+    all_rows: list[tuple[Any, ...]] = []
+    for batch_no, start in enumerate(
+        range(0, need_total, batch_size), start=1
+    ):
+        batch_bans = consumed_bans[start : start + batch_size]
+        batch_sql = oq.build_p_ban_h_sql(sql_template, batch_bans)
+        messages.append(
+            f"  Oracle batch {batch_no}/{oq.P_BAN_H_VTS2_BATCHES} "
+            f"({len(batch_bans)} BANs) …"
+        )
+        rows, _cols = oq.run_sql(batch_sql)
+        messages.append(f"    Batch {batch_no} returned {len(rows)} row(s).")
+        entry["batches"].append(
+            {"batch": batch_no, "banCount": len(batch_bans), "rowCount": len(rows)}
+        )
+        all_rows.extend(rows)
+
+    if not all_rows:
+        entry["message"] = "Oracle P_BAN_H query returned no rows across all batches."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    headers, vts_rows = oq.rows_for_vts_import("p_ban_h_vts2", all_rows)
+    if not vts_rows:
+        entry["message"] = "Could not parse query rows into 7 VTS history columns."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    txt_path = out_dir / meta["txtFile"]
+    row_count = oq.write_remediation_txt(txt_path, "p_ban_h_vts2", all_rows, [])
+    if row_count != len(vts_rows):
+        row_count = len(vts_rows)
+    entry["txtFile"] = str(txt_path.relative_to(proj))
+    entry["rowCount"] = row_count
+    messages.append(
+        f"  Wrote {meta['txtFile']} ({row_count} data rows + header "
+        f"{','.join(headers)})."
+    )
+
+    imp = _import_vts_data(
+        VTS2_URL,
+        "VTS 2",
+        headers,
+        vts_rows,
+        txt_path,
+        meta["txtFile"],
+        messages,
+    )
+    entry["import"] = imp
+    if not imp.get("verified"):
+        entry["message"] = imp.get("message") or "VTS import failed verification."
+        messages.append(f"  FAILED — {entry['message']}")
+        upload = imp.get("upload") or {}
+        if upload.get("responseBody"):
+            messages.append(f"    VTS response: {upload['responseBody'][:200]}")
+        for row in (imp.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"    {row.get('column')}: expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+        return entry
+
+    messages.append(
+        f"  Removing consumed {need_total} P_BAN values from VTS 1 "
+        f"(keeping {len(remaining_bans)} existing values) …"
+    )
+    trim = vts.replace_column_values(
+        VTS1_URL,
+        "P_BAN",
+        remaining_bans,
+        filename="P_BAN_remaining.txt",
+    )
+    entry["pBanTrim"] = trim
+    if not trim.get("verified"):
+        entry["message"] = (
+            trim.get("message")
+            or "VTS2 import succeeded but VTS1 P_BAN trim failed verification."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        for row in (trim.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"    P_BAN trim — expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+        return entry
+
+    entry["success"] = True
+    entry["message"] = (
+        f"Validation 6 complete — imported {row_count} rows into VTS 2 "
+        f"and trimmed VTS 1 P_BAN from {len(p_ban_values)} to "
+        f"{len(remaining_bans)}."
+    )
+    messages.append(f"  {entry['message']}")
+    return entry
+
+
 def run_vts1_remediation(
     issues: list[str] | None = None,
     *,
@@ -578,6 +728,32 @@ def run_vts1_remediation(
                 continue
             try:
                 entry = _remediate_p_new_imei_vts2(sql, out_dir, proj, messages)
+            except Exception as exc:
+                entry = {
+                    "issue": issue_key,
+                    "label": meta["label"],
+                    "success": False,
+                    "message": str(exc),
+                }
+                messages.append(f"  FAILED — {exc}")
+            results.append(entry)
+            continue
+
+        if issue_key == "p_ban_h_vts2":
+            messages.append(f"--- {meta['label']} ---")
+            if not sql:
+                results.append(
+                    {
+                        "issue": issue_key,
+                        "label": meta["label"],
+                        "success": False,
+                        "message": "SQL query is empty.",
+                    }
+                )
+                messages.append("  FAILED — SQL query is empty.")
+                continue
+            try:
+                entry = _remediate_p_ban_h_vts2(sql, out_dir, proj, messages)
             except Exception as exc:
                 entry = {
                     "issue": issue_key,
@@ -948,6 +1124,16 @@ def run_vts_prep() -> dict[str, Any]:
     validation_details.append(v2h_entry)
     messages.append(v2h_entry["message"])
 
+    vts2_p_ban_h = _min_count_validation_entry(
+        vts2_counts,
+        "P_BAN_H",
+        vts.VTS2_MIN_COUNTS["P_BAN_H"],
+        id="vts2-p_ban_h",
+        name=f"VTS 2 — P_BAN_H >= {vts.VTS2_MIN_COUNTS['P_BAN_H']}",
+    )
+    validation_details.append(vts2_p_ban_h)
+    messages.append(vts2_p_ban_h["message"])
+
     p_new_check = vts.check_p_new_imei_gte_ban_h(vts2_counts)
     p_new_entry = {
         "id": "vts2-new-imei",
@@ -989,6 +1175,7 @@ def run_vts_prep() -> dict[str, Any]:
             "vts2-p_sim",
             "vts1-p_imei_ip14128pur",
             "vts2-p_new_imei",
+            "vts2-p_ban_h",
         ) and not v["passed"]:
             return _prep_fail(v["message"])
     if not v2c_entry["passed"] or not v2h_entry["passed"]:
