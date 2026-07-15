@@ -28,6 +28,7 @@ VTS2_MIN_COUNTS: dict[str, int] = {
     "P_BAN_C": 1000,
     "P_BAN_H": 1000,
     "P_SIM": 5000,
+    "P_NEW_IMEI": 1500,
 }
 
 VTS1_ALIGN_COLUMNS = ("P_BAN", "P_SUBSCRIBER")
@@ -580,6 +581,8 @@ def import_txt(base_url: str, txt_path: Path | str, columns: list[str] | None = 
             columns = ["P_BAN", "P_SUBSCRIBER"]
         elif "P_BAN_C" in name:
             columns = list(VTS2_ALIGN_GROUP_C)
+        elif "P_NEW_IMEI" in name:
+            columns = ["P_NEW_IMEI"]
         elif "P_SIM" in name:
             columns = ["P_SIM"]
         elif "IMEI" in name:

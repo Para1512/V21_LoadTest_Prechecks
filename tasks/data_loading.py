@@ -56,6 +56,8 @@ def remediation_issues(
             issues.append("p_imei_ip14128pur")
         if "P_BAN_C" in vts2_failed:
             issues.append("p_ban_c_vts2")
+        if "P_NEW_IMEI" in vts2_failed:
+            issues.append("p_new_imei_vts2")
     if prep:
         for v in prep.get("validationDetails") or []:
             if not v.get("passed"):
@@ -67,6 +69,8 @@ def remediation_issues(
                     issues.append("p_imei_ip14128pur")
                 elif v.get("id") == "vts2-current" and "p_ban_c_vts2" not in issues:
                     issues.append("p_ban_c_vts2")
+                elif v.get("id") == "vts2-p_new_imei" and "p_new_imei_vts2" not in issues:
+                    issues.append("p_new_imei_vts2")
     return issues
 
 
@@ -371,6 +375,81 @@ def _remediate_p_ban_c_vts2(
     return entry
 
 
+def _remediate_p_new_imei_vts2(
+    sql: str,
+    out_dir: Path,
+    proj: Path,
+    messages: list[str],
+) -> dict[str, Any]:
+    """
+    Validation 5 (VTS 2 — P_NEW_IMEI):
+    Trigger: P_NEW_IMEI count < 1500.
+    Clear column → Oracle query (up to 4k IMEI rows) → TXT with header → VTS2 import.
+    """
+    meta = oq.QUERY_META["p_new_imei_vts2"]
+    col = "P_NEW_IMEI"
+    entry: dict[str, Any] = {
+        "issue": "p_new_imei_vts2",
+        "label": meta["label"],
+        "success": False,
+        "clearDetails": [],
+        "txtFile": None,
+        "rowCount": 0,
+        "import": None,
+    }
+
+    vts.clear_column(VTS2_URL, col)
+    entry["clearDetails"].append({"vts": "VTS 2", "column": col, "success": True})
+    messages.append(f"  Cleared VTS 2 — {col}: Passed")
+
+    messages.append("  Running Oracle P_NEW_IMEI query (rownum <= 4000) …")
+    rows, _cols = oq.run_sql(sql)
+    messages.append(f"  Query returned {len(rows)} row(s).")
+    if not rows:
+        entry["message"] = "Oracle P_NEW_IMEI query returned no rows."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    txt_path = out_dir / meta["txtFile"]
+    row_count = oq.write_remediation_txt(txt_path, "p_new_imei_vts2", rows, _cols)
+    entry["txtFile"] = str(txt_path.relative_to(proj))
+    entry["rowCount"] = row_count
+    messages.append(
+        f"  Wrote {meta['txtFile']} ({row_count} data rows + header {col})."
+    )
+
+    headers, vts_rows = oq.rows_for_vts_import("p_new_imei_vts2", rows)
+    imp = _import_vts_data(
+        VTS2_URL,
+        "VTS 2",
+        headers,
+        vts_rows,
+        txt_path,
+        meta["txtFile"],
+        messages,
+    )
+    entry["import"] = imp
+    if not imp.get("verified"):
+        entry["message"] = imp.get("message") or "VTS import failed verification."
+        messages.append(f"  FAILED — {entry['message']}")
+        upload = imp.get("upload") or {}
+        if upload.get("responseBody"):
+            messages.append(f"    VTS response: {upload['responseBody'][:200]}")
+        for row in (imp.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"    {row.get('column')}: expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+        return entry
+
+    entry["success"] = True
+    entry["message"] = (
+        f"Validation 5 complete — imported {row_count} rows into VTS 2 {col}."
+    )
+    messages.append(f"  {entry['message']}")
+    return entry
+
+
 def run_vts1_remediation(
     issues: list[str] | None = None,
     *,
@@ -473,6 +552,32 @@ def run_vts1_remediation(
                 continue
             try:
                 entry = _remediate_p_ban_c_vts2(sql, out_dir, proj, messages)
+            except Exception as exc:
+                entry = {
+                    "issue": issue_key,
+                    "label": meta["label"],
+                    "success": False,
+                    "message": str(exc),
+                }
+                messages.append(f"  FAILED — {exc}")
+            results.append(entry)
+            continue
+
+        if issue_key == "p_new_imei_vts2":
+            messages.append(f"--- {meta['label']} ---")
+            if not sql:
+                results.append(
+                    {
+                        "issue": issue_key,
+                        "label": meta["label"],
+                        "success": False,
+                        "message": "SQL query is empty.",
+                    }
+                )
+                messages.append("  FAILED — SQL query is empty.")
+                continue
+            try:
+                entry = _remediate_p_new_imei_vts2(sql, out_dir, proj, messages)
             except Exception as exc:
                 entry = {
                     "issue": issue_key,
@@ -815,6 +920,16 @@ def run_vts_prep() -> dict[str, Any]:
     validation_details.append(vts2_p_sim)
     messages.append(vts2_p_sim["message"])
 
+    vts2_p_new_imei = _min_count_validation_entry(
+        vts2_counts,
+        "P_NEW_IMEI",
+        vts.VTS2_MIN_COUNTS["P_NEW_IMEI"],
+        id="vts2-p_new_imei",
+        name=f"VTS 2 — P_NEW_IMEI >= {vts.VTS2_MIN_COUNTS['P_NEW_IMEI']}",
+    )
+    validation_details.append(vts2_p_new_imei)
+    messages.append(vts2_p_new_imei["message"])
+
     vts2_align_c = vts.check_columns_equal(
         vts2_counts, vts.VTS2_ALIGN_GROUP_C, label="VTS 2 (current)"
     )
@@ -869,7 +984,12 @@ def run_vts_prep() -> dict[str, Any]:
     if not v1_entry["passed"]:
         return _prep_fail("P_BAN & P_SUBSCRIBER data is not aligned.")
     for v in validation_details:
-        if v["id"] in ("vts1-p_sim", "vts2-p_sim", "vts1-p_imei_ip14128pur") and not v["passed"]:
+        if v["id"] in (
+            "vts1-p_sim",
+            "vts2-p_sim",
+            "vts1-p_imei_ip14128pur",
+            "vts2-p_new_imei",
+        ) and not v["passed"]:
             return _prep_fail(v["message"])
     if not v2c_entry["passed"] or not v2h_entry["passed"]:
         detail = []

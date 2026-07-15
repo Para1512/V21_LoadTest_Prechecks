@@ -76,7 +76,28 @@ P_BAN_C_VTS2_COLUMNS = [
     "P_IMSI_C",
 ]
 
-QUERY_KEYS = ("ban_subscriber", "p_sim", "p_imei_ip14128pur", "p_ban_c_vts2")
+DEFAULT_P_NEW_IMEI_VTS2_SQL = (
+    "SELECT /*+ PARALLEL*/ REPLACE(d.ESN_IMEI, ' ', '') AS IMEI "
+    "FROM dealer_equipment d, item_definition i "
+    "WHERE d.item_id = i.item_id "
+    "AND D.ESN_IMEI NOT IN ("
+    "SELECT s.serial_number FROM serial_item_inv s WHERE S.SERIAL_NUMBER = D.ESN_IMEI) "
+    "AND D.ESN_IMEI NOT IN (SELECT UNIT_ESN FROM physical_device) "
+    "AND d.esn_imei NOT IN ("
+    "SELECT phd.unit_esn FROM physical_device phd WHERE phd.unit_esn = D.ESN_IMEI) "
+    "AND d.item_id = 'IP14256MDN' "
+    "AND NVL(d.franchise_type, 'R') <> 'F' AND rownum <= 4000"
+)
+
+P_NEW_IMEI_VTS2_ROW_LIMIT = 4000
+
+QUERY_KEYS = (
+    "ban_subscriber",
+    "p_sim",
+    "p_imei_ip14128pur",
+    "p_ban_c_vts2",
+    "p_new_imei_vts2",
+)
 
 QUERY_META: dict[str, dict[str, Any]] = {
     "ban_subscriber": {
@@ -114,6 +135,15 @@ QUERY_META: dict[str, dict[str, Any]] = {
         "headers": P_BAN_C_VTS2_COLUMNS,
         "vts": "VTS 2",
     },
+    "p_new_imei_vts2": {
+        "id": "p_new_imei_vts2",
+        "label": "VTS 2 — P_NEW_IMEI (Validation 5)",
+        "clearColumns": ["P_NEW_IMEI"],
+        "txtFile": "P_NEW_IMEI.txt",
+        "headers": ["P_NEW_IMEI"],
+        "vts": "VTS 2",
+        "queryRowLimit": P_NEW_IMEI_VTS2_ROW_LIMIT,
+    },
 }
 
 
@@ -123,6 +153,7 @@ def default_queries() -> dict[str, str]:
         "p_sim": DEFAULT_P_SIM_SQL,
         "p_imei_ip14128pur": DEFAULT_P_IMEI_SQL,
         "p_ban_c_vts2": DEFAULT_P_BAN_C_VTS2_SQL,
+        "p_new_imei_vts2": DEFAULT_P_NEW_IMEI_VTS2_SQL,
     }
 
 
@@ -257,6 +288,8 @@ def rows_for_vts_import(
             parsed = parse_p_ban_c_query_row(row)
             if parsed:
                 out.append(parsed)
+        elif issue_key == "p_new_imei_vts2":
+            out.append((str(row[0] or "").strip(),))
         else:
             out.append(tuple(str(row[i] if i < len(row) else "") for i in range(len(headers))))
     return headers, out
@@ -290,6 +323,8 @@ def write_remediation_txt(
                 lines.append(",".join(parsed))
                 count += 1
             continue
+        elif issue_key == "p_new_imei_vts2":
+            lines.append(f"{str(row[0] or '').strip()}")
         else:
             vals = [str(row[i] if i < len(row) else "") for i in range(len(headers))]
             lines.append(",".join(vals))
