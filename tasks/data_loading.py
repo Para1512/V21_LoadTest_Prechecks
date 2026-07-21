@@ -504,22 +504,64 @@ def _remediate_p_ban_h_vts2(
 
     consumed = paired[-need_total:]
     remaining = paired[:-need_total]
-    consumed_bans = [row[0] for row in consumed]
+    consumed_bans = [str(row[0]).strip() for row in consumed if str(row[0] or "").strip()]
     messages.append(
         f"  Using last {need_total} pairs for Oracle "
         f"({batch_size} BANs x {oq.P_BAN_H_VTS2_BATCHES} batches); "
-        f"keeping {len(remaining)} pairs for VTS 1 reload."
+        f"keeping {len(remaining)} pairs for VTS 1 reload "
+        "(export header row skipped)."
     )
+    if len(consumed_bans) < batch_size:
+        entry["message"] = (
+            f"Only {len(consumed_bans)} P_BAN values available; "
+            f"need at least {batch_size} per Oracle batch."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
 
     all_rows: list[tuple[Any, ...]] = []
-    for batch_no, start in enumerate(range(0, need_total, batch_size), start=1):
+    batch_count = min(
+        oq.P_BAN_H_VTS2_BATCHES,
+        len(consumed_bans) // batch_size,
+    )
+    if batch_count < 1:
+        entry["message"] = (
+            f"Need at least {batch_size} BANs for one Oracle batch; "
+            f"got {len(consumed_bans)}."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    for batch_no in range(1, batch_count + 1):
+        start = (batch_no - 1) * batch_size
         batch_bans = consumed_bans[start : start + batch_size]
-        batch_sql = oq.build_p_ban_h_sql(sql_template, batch_bans)
+        try:
+            batch_sql = oq.build_p_ban_h_sql(sql_template, batch_bans)
+        except ValueError as exc:
+            entry["message"] = str(exc)
+            messages.append(f"  FAILED — {exc}")
+            return entry
         messages.append(
-            f"  Oracle batch {batch_no}/{oq.P_BAN_H_VTS2_BATCHES} "
+            f"  Oracle batch {batch_no}/{batch_count} "
             f"({len(batch_bans)} BANs) …"
         )
-        rows, _cols = oq.run_sql(batch_sql)
+        try:
+            rows, _cols = oq.run_sql(batch_sql)
+        except Exception as exc:
+            err = str(exc)
+            entry["message"] = err
+            messages.append(f"  FAILED — Oracle batch {batch_no}: {err}")
+            if "ORA-01722" in err or "invalid number" in err.lower():
+                sample = ", ".join(batch_bans[:8])
+                messages.append(
+                    "  Hint: confirm export header was skipped and BANs look numeric. "
+                    f"Sample BANs in this batch: {sample}"
+                )
+                messages.append(
+                    "  Ensure Oracle Queries for Validation 6 uses: "
+                    "WHERE TO_CHAR(a.customer_id) IN ({BAN_LIST})"
+                )
+            return entry
         messages.append(f"    Batch {batch_no} returned {len(rows)} row(s).")
         entry["batches"].append(
             {"batch": batch_no, "banCount": len(batch_bans), "rowCount": len(rows)}

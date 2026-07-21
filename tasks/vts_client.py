@@ -816,13 +816,14 @@ def _extract_column_values_from_payload(
 
 
 def _parse_export_column_text(text: str) -> list[str]:
+    """Parse single-column VTS export; always skip first line (header)."""
     lines = [ln.strip() for ln in text.replace("\r\n", "\n").splitlines() if ln.strip()]
     if not lines:
         return []
-    if len(lines) > 1 and lines[0].upper() == lines[0] and "," not in lines[0]:
-        lines = lines[1:]
+    # Export files include a header row — skip it
+    data_lines = lines[1:] if len(lines) > 1 else []
     out: list[str] = []
-    for line in lines:
+    for line in data_lines:
         if "," in line:
             out.append(line.split(",", 1)[0].strip())
         else:
@@ -834,25 +835,26 @@ def _parse_export_csv_pairs(
     text: str,
     columns: list[str],
 ) -> list[tuple[str, ...]]:
+    """Parse multi-column VTS export CSV; always skip first line (header)."""
     lines = [ln.strip() for ln in text.replace("\r\n", "\n").splitlines() if ln.strip()]
-    if not lines:
+    if len(lines) < 2:
         return []
+
     header_parts = [p.strip().upper() for p in lines[0].split(",")]
     expected = [c.upper() for c in columns]
-    start = 0
     indexes: list[int] = []
     if set(expected).issubset(set(header_parts)):
-        start = 1
         for col in expected:
             indexes.append(header_parts.index(col))
     elif len(header_parts) >= len(columns):
-        # No recognizable header — assume column order matches requested columns
+        # Header present but names differ — use first N columns in order
         indexes = list(range(len(columns)))
     else:
         return []
 
     pairs: list[tuple[str, ...]] = []
-    for line in lines[start:]:
+    # Always skip first line (header)
+    for line in lines[1:]:
         parts = [p.strip() for p in line.split(",")]
         if max(indexes, default=-1) >= len(parts):
             continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,8 @@ DEFAULT_P_BAN_H_VTS2_SQL = (
     "FROM billing_account a "
     "JOIN subscriber b ON a.customer_id = b.customer_id "
     "JOIN service_agreement d ON d.ban = a.customer_id "
-    f"WHERE a.customer_id IN ({P_BAN_H_BAN_LIST_PLACEHOLDER})"
+    # TO_CHAR avoids ORA-01722 when customer_id is NUMBER and BAN list is text
+    f"WHERE TO_CHAR(a.customer_id) IN ({P_BAN_H_BAN_LIST_PLACEHOLDER})"
 )
 
 QUERY_KEYS = (
@@ -319,12 +321,21 @@ def _normalize_p_ban_h_field(column: str, value: str) -> str:
     return text
 
 
+def normalize_ban_value(ban: Any) -> str | None:
+    """Trim a VTS P_BAN value for Oracle IN-list use (header already skipped on export)."""
+    text = str(ban or "").strip()
+    return text or None
+
+
 def build_ban_in_clause(bans: list[str]) -> str:
+    """Build quoted string IN-list of BAN values (for TO_CHAR comparisons)."""
     quoted: list[str] = []
+    seen: set[str] = set()
     for ban in bans:
-        text = str(ban or "").strip()
-        if not text:
+        text = normalize_ban_value(ban)
+        if not text or text in seen:
             continue
+        seen.add(text)
         quoted.append("'" + text.replace("'", "''") + "'")
     if not quoted:
         raise ValueError("BAN list is empty.")
@@ -336,6 +347,22 @@ def build_p_ban_h_sql(template: str, bans: list[str]) -> str:
     if not sql:
         raise ValueError("P_BAN_H SQL template is empty.")
     clause = build_ban_in_clause(bans)
+
+    # Avoid ORA-01722: never compare NUMBER customer_id / ban to unvalidated strings
+    sql = re.sub(
+        r"(?i)\b(a\.)?customer_id\s+IN\s*\(",
+        "TO_CHAR(a.customer_id) IN (",
+        sql,
+        count=1,
+    )
+    # If template already had TO_CHAR(a.customer_id), the regex above may have
+    # created TO_CHAR(TO_CHAR(...)) — normalize that.
+    sql = re.sub(
+        r"(?i)TO_CHAR\s*\(\s*TO_CHAR\s*\(\s*a\.customer_id\s*\)\s*\)",
+        "TO_CHAR(a.customer_id)",
+        sql,
+    )
+
     if P_BAN_H_BAN_LIST_PLACEHOLDER in sql:
         return sql.replace(P_BAN_H_BAN_LIST_PLACEHOLDER, clause)
     if "'BAN1'" in sql or "'BAN2'" in sql:
@@ -344,6 +371,13 @@ def build_p_ban_h_sql(template: str, bans: list[str]) -> str:
             end = sql.find(")", start)
             if end > start:
                 return sql[: start + 4] + clause + sql[end:]
+    # Replace last IN (...) content for customer_id / ban filters
+    upper = sql.upper()
+    start = upper.rfind(" IN (")
+    if start >= 0:
+        end = sql.find(")", start)
+        if end > start:
+            return sql[: start + 4] + clause + sql[end:]
     raise ValueError(
         f"P_BAN_H SQL must include {P_BAN_H_BAN_LIST_PLACEHOLDER} in the IN clause."
     )
