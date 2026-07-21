@@ -92,6 +92,10 @@ def export_column_url(base_url: str, colname: str) -> str:
     )
 
 
+def export_csv_url(base_url: str) -> str:
+    return f"{vts_api_root(base_url)}/data/export_csv"
+
+
 def clear_column_url(base_url: str, colname: str) -> str:
     return f"{vts_api_root(base_url)}/data/clear_column?colname={quote(colname, safe='')}"
 
@@ -642,7 +646,12 @@ def verify_column_counts(
     all_ok = True
     for col, need in expected.items():
         actual = column_count(counts, col)
-        ok = actual is not None and need > 0 and actual == need
+        if actual is None:
+            ok = False
+        elif need == 0:
+            ok = actual == 0
+        else:
+            ok = abs(actual - need) <= tolerance and actual == need
         if not ok:
             all_ok = False
         rows.append({"column": col, "expected": need, "actual": actual, "passed": ok})
@@ -676,12 +685,21 @@ def fetch_get_page_rows(
     *,
     rows: int,
     page: int = 1,
+    require_counts: bool = False,
 ) -> dict[str, Any]:
     url = get_page_data_url(base_url, rows=rows, page=page)
-    return _fetch_get_page_payload(base_url, url)
+    return _fetch_get_page_payload(
+        base_url, url, require_counts=require_counts
+    )
 
 
-def _fetch_get_page_payload(base_url: str, url: str) -> dict[str, Any]:
+def _fetch_get_page_payload(
+    base_url: str,
+    url: str,
+    *,
+    require_counts: bool = True,
+) -> dict[str, Any]:
+    _ = base_url
     try:
         response = requests.get(url, timeout=VTS_REQUEST_TIMEOUT_S)
         response.raise_for_status()
@@ -694,7 +712,7 @@ def _fetch_get_page_payload(base_url: str, url: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"VTS response shape unexpected ({url})")
     counts = payload.get("countsPerColumn")
-    if not isinstance(counts, dict):
+    if require_counts and not isinstance(counts, dict):
         raise RuntimeError(f"VTS response missing countsPerColumn ({url})")
     return payload
 
@@ -812,30 +830,188 @@ def _parse_export_column_text(text: str) -> list[str]:
     return [v for v in out if v]
 
 
+def _parse_export_csv_pairs(
+    text: str,
+    columns: list[str],
+) -> list[tuple[str, ...]]:
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    header_parts = [p.strip().upper() for p in lines[0].split(",")]
+    expected = [c.upper() for c in columns]
+    start = 0
+    indexes: list[int] = []
+    if set(expected).issubset(set(header_parts)):
+        start = 1
+        for col in expected:
+            indexes.append(header_parts.index(col))
+    elif len(header_parts) >= len(columns):
+        # No recognizable header — assume column order matches requested columns
+        indexes = list(range(len(columns)))
+    else:
+        return []
+
+    pairs: list[tuple[str, ...]] = []
+    for line in lines[start:]:
+        parts = [p.strip() for p in line.split(",")]
+        if max(indexes, default=-1) >= len(parts):
+            continue
+        row = tuple(parts[i] for i in indexes)
+        if all(row):
+            pairs.append(row)
+    return pairs
+
+
+def _extract_paired_rows_from_payload(
+    payload: dict[str, Any],
+    columns: list[str],
+) -> list[tuple[str, ...]]:
+    if len(columns) < 2:
+        return []
+
+    # Column-oriented maps
+    for key in ("columnData", "columnsData", "dataPerColumn"):
+        raw = payload.get(key)
+        if isinstance(raw, dict):
+            series: list[list[str]] = []
+            ok = True
+            for col in columns:
+                found = None
+                for col_key, col_vals in raw.items():
+                    if str(col_key).upper() == col.upper() and isinstance(col_vals, list):
+                        found = [str(v or "").strip() for v in col_vals]
+                        break
+                if found is None:
+                    ok = False
+                    break
+                series.append(found)
+            if ok and series:
+                n = min(len(s) for s in series)
+                return [
+                    tuple(series[i][r] for i in range(len(columns)))
+                    for r in range(n)
+                    if all(series[i][r] for i in range(len(columns)))
+                ]
+
+    column_names = _column_names_from_payload(payload)
+    indexes = [_match_column_index(column_names, c) for c in columns]
+
+    row_sources: list[Any] = []
+    for key in ("rows", "data", "pageData", "items"):
+        raw = payload.get(key)
+        if isinstance(raw, list) and raw:
+            row_sources.append(raw)
+    table = payload.get("table")
+    if isinstance(table, dict):
+        for key in ("rows", "data"):
+            raw = table.get(key)
+            if isinstance(raw, list) and raw:
+                row_sources.append(raw)
+
+    pairs: list[tuple[str, ...]] = []
+    for rows in row_sources:
+        for record in rows:
+            vals: list[str] = []
+            for i, col in enumerate(columns):
+                idx = indexes[i] if indexes and indexes[i] is not None else None
+                val = _values_from_row_record(record, col, idx)
+                vals.append(val or "")
+            if all(vals):
+                pairs.append(tuple(vals))
+        if pairs:
+            return pairs
+    return pairs
+
+
 def fetch_column_values(base_url: str, column: str) -> list[str]:
     """Read all values from a VTS column (export_column, then paginated get_page)."""
-    export_url = export_column_url(base_url, column)
+    pairs = fetch_column_pairs(base_url, [column])
+    return [row[0] for row in pairs]
+
+
+def fetch_column_pairs(
+    base_url: str,
+    columns: list[str],
+) -> list[tuple[str, ...]]:
+    """
+    Read aligned values for one or more VTS columns.
+    Tries export_csv / export_column, then paginated get_page.
+    """
+    if not columns:
+        return []
+
+    # Full-table CSV export (best for P_BAN,P_SUBSCRIBER pairs)
     try:
-        response = requests.get(export_url, timeout=VTS_REQUEST_TIMEOUT_S)
+        response = requests.get(export_csv_url(base_url), timeout=VTS_IMPORT_TIMEOUT_S)
         if response.ok and (response.text or "").strip():
-            values = _parse_export_column_text(response.text)
-            if values:
-                return values
+            pairs = _parse_export_csv_pairs(response.text, columns)
+            if pairs:
+                return pairs
     except requests.RequestException:
         pass
 
-    payload = fetch_get_page(base_url)
-    expected = column_count(payload.get("countsPerColumn") or {}, column)
-    if expected is None or expected <= 0:
-        return []
+    # Per-column export then zip by index
+    if len(columns) == 1:
+        export_url = export_column_url(base_url, columns[0])
+        try:
+            response = requests.get(export_url, timeout=VTS_REQUEST_TIMEOUT_S)
+            if response.ok and (response.text or "").strip():
+                values = _parse_export_column_text(response.text)
+                if values:
+                    return [(v,) for v in values]
+        except requests.RequestException:
+            pass
+    else:
+        per_col: list[list[str]] = []
+        for col in columns:
+            export_url = export_column_url(base_url, col)
+            try:
+                response = requests.get(export_url, timeout=VTS_REQUEST_TIMEOUT_S)
+                if response.ok and (response.text or "").strip():
+                    values = _parse_export_column_text(response.text)
+                    if values:
+                        per_col.append(values)
+                        continue
+            except requests.RequestException:
+                pass
+            break
+        if len(per_col) == len(columns):
+            n = min(len(s) for s in per_col)
+            return [
+                tuple(per_col[i][r] for i in range(len(columns)))
+                for r in range(n)
+                if all(per_col[i][r] for i in range(len(columns)))
+            ]
 
-    page_size = 1000
-    collected: list[str] = []
+    # Paginated get_page
+    meta = fetch_get_page(base_url)
+    counts = meta.get("countsPerColumn") or {}
+    expected_counts = [column_count(counts, c) for c in columns]
+    if any(c is None or c <= 0 for c in expected_counts):
+        return []
+    expected = min(int(c) for c in expected_counts if c is not None)
+
+    page_size = min(1000, max(100, expected))
+    collected: list[tuple[str, ...]] = []
     page = 1
     max_pages = max(1, (expected + page_size - 1) // page_size) + 2
     while page <= max_pages and len(collected) < expected:
-        page_payload = fetch_get_page_rows(base_url, rows=page_size, page=page)
-        chunk = _extract_column_values_from_payload(page_payload, column)
+        page_payload = fetch_get_page_rows(
+            base_url, rows=page_size, page=page, require_counts=False
+        )
+        chunk = _extract_paired_rows_from_payload(page_payload, columns)
+        if not chunk:
+            # Fallback: pull each column independently from this page payload
+            series = [
+                _extract_column_values_from_payload(page_payload, col) for col in columns
+            ]
+            if all(series):
+                n = min(len(s) for s in series)
+                chunk = [
+                    tuple(series[i][r] for i in range(len(columns)))
+                    for r in range(n)
+                    if all(series[i][r] for i in range(len(columns)))
+                ]
         if not chunk:
             break
         collected.extend(chunk)
@@ -846,12 +1022,15 @@ def fetch_column_values(base_url: str, column: str) -> list[str]:
     if collected:
         return collected[:expected]
 
-    single = fetch_get_page_rows(base_url, rows=expected, page=1)
-    chunk = _extract_column_values_from_payload(single, column)
+    single = fetch_get_page_rows(
+        base_url, rows=expected, page=1, require_counts=False
+    )
+    chunk = _extract_paired_rows_from_payload(single, columns)
     if chunk:
         return chunk[:expected]
     raise RuntimeError(
-        f"Could not read {column} values from VTS — export_column and get_page returned no data."
+        f"Could not read {','.join(columns)} from VTS — "
+        "export_csv / export_column / get_page returned no usable data."
     )
 
 
@@ -863,21 +1042,54 @@ def replace_column_values(
     filename: str | None = None,
 ) -> dict[str, Any]:
     """Clear a column and re-import the provided values (single-column TXT)."""
-    clear_column(base_url, column)
-    cleaned = [str(v or "").strip() for v in values if str(v or "").strip()]
+    return replace_column_pairs(
+        base_url,
+        [column],
+        [(v,) for v in values],
+        filename=filename or f"{column}.txt",
+    )
+
+
+def replace_column_pairs(
+    base_url: str,
+    columns: list[str],
+    rows: list[tuple[str, ...]],
+    *,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Clear columns then re-import remaining rows as a single multi-column TXT."""
+    for col in columns:
+        clear_column(base_url, col)
+
+    cleaned: list[tuple[str, ...]] = []
+    for row in rows:
+        vals = tuple(str(c or "").strip() for c in row[: len(columns)])
+        if len(vals) < len(columns):
+            continue
+        if all(vals):
+            cleaned.append(vals)
+
     if not cleaned:
-        verify = verify_column_counts(base_url, {column: 0})
+        expected = {col: 0 for col in columns}
+        verify = verify_column_counts(base_url, expected)
         return {
             "success": True,
             "verified": bool(verify.get("verified")),
-            "columns": [column],
-            "expectedCounts": {column: 0},
-            "message": f"{column} cleared (no values to re-import).",
+            "columns": columns,
+            "expectedCounts": expected,
+            "message": f"{','.join(columns)} cleared (no remaining rows to re-import).",
             "verification": verify,
         }
-    content = build_csv_bytes([column], [(v,) for v in cleaned])
-    upload_name = filename or f"{column}.txt"
-    return import_csv_bytes(base_url, content, upload_name, [column], colname=column)
+
+    upload_name = filename or f"{'_'.join(columns)}_remaining.txt"
+    content = build_csv_bytes(columns, cleaned)
+    return import_csv_bytes(
+        base_url,
+        content,
+        upload_name,
+        columns,
+        colname=None if len(columns) > 1 else columns[0],
+    )
 
 
 def clear_column(base_url: str, colname: str) -> dict[str, Any]:

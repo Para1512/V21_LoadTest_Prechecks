@@ -187,7 +187,7 @@ QUERY_META: dict[str, dict[str, Any]] = {
         "batchSize": P_BAN_H_VTS2_BATCH_SIZE,
         "totalRows": P_BAN_H_VTS2_TOTAL,
         "batches": P_BAN_H_VTS2_BATCHES,
-        "sourceColumn": "P_BAN",
+        "sourceColumns": ["P_BAN", "P_SUBSCRIBER"],
         "sourceVts": "VTS 1",
     },
 }

@@ -73,6 +73,8 @@ def remediation_issues(
                     issues.append("p_ban_c_vts2")
                 elif v.get("id") == "vts2-history" and "p_ban_h_vts2" not in issues:
                     issues.append("p_ban_h_vts2")
+                elif v.get("id") == "vts2-p_ban_h" and "p_ban_h_vts2" not in issues:
+                    issues.append("p_ban_h_vts2")
                 elif v.get("id") == "vts2-p_new_imei" and "p_new_imei_vts2" not in issues:
                     issues.append("p_new_imei_vts2")
     return issues
@@ -463,13 +465,15 @@ def _remediate_p_ban_h_vts2(
     """
     Validation 6 (VTS 2 — P_BAN_H & history columns):
     Trigger: P_BAN_H < 2000 OR history column counts not aligned.
-    Clear 7 columns → read last 3000 P_BAN from VTS1 (3x1000 Oracle batches)
-    → combined TXT → VTS2 import → remove consumed 3000 from VTS1 P_BAN.
+    Clear 7 VTS2 history columns → export P_BAN,P_SUBSCRIBER from VTS1 →
+    take last 3000 → Oracle 3x1000 BAN batches → history TXT → VTS2 import →
+    clear VTS1 P_BAN & P_SUBSCRIBER → re-import remaining pairs.
     """
     meta = oq.QUERY_META["p_ban_h_vts2"]
     columns = list(meta["clearColumns"])
     need_total = oq.P_BAN_H_VTS2_TOTAL
     batch_size = oq.P_BAN_H_VTS2_BATCH_SIZE
+    source_headers = ["P_BAN", "P_SUBSCRIBER"]
     entry: dict[str, Any] = {
         "issue": "p_ban_h_vts2",
         "label": meta["label"],
@@ -479,7 +483,7 @@ def _remediate_p_ban_h_vts2(
         "rowCount": 0,
         "import": None,
         "batches": [],
-        "pBanTrim": None,
+        "vts1Reload": None,
     }
 
     for col in columns:
@@ -487,27 +491,28 @@ def _remediate_p_ban_h_vts2(
         entry["clearDetails"].append({"vts": "VTS 2", "column": col, "success": True})
         messages.append(f"  Cleared VTS 2 — {col}: Passed")
 
-    messages.append("  Reading P_BAN values from VTS 1 …")
-    p_ban_values = vts.fetch_column_values(VTS1_URL, "P_BAN")
-    messages.append(f"  VTS 1 P_BAN count: {len(p_ban_values)}.")
-    if len(p_ban_values) < need_total:
+    messages.append("  Exporting P_BAN,P_SUBSCRIBER from VTS 1 …")
+    paired = vts.fetch_column_pairs(VTS1_URL, source_headers)
+    messages.append(f"  VTS 1 P_BAN/P_SUBSCRIBER pairs: {len(paired)}.")
+    if len(paired) < need_total:
         entry["message"] = (
-            f"VTS 1 P_BAN has {len(p_ban_values)} values; need at least {need_total}."
+            f"VTS 1 has {len(paired)} P_BAN/P_SUBSCRIBER pairs; "
+            f"need at least {need_total}."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
-    consumed_bans = p_ban_values[-need_total:]
-    remaining_bans = p_ban_values[:-need_total]
+    consumed = paired[-need_total:]
+    remaining = paired[:-need_total]
+    consumed_bans = [row[0] for row in consumed]
     messages.append(
-        f"  Using last {need_total} P_BAN values for Oracle "
-        f"({batch_size} per batch x {oq.P_BAN_H_VTS2_BATCHES})."
+        f"  Using last {need_total} pairs for Oracle "
+        f"({batch_size} BANs x {oq.P_BAN_H_VTS2_BATCHES} batches); "
+        f"keeping {len(remaining)} pairs for VTS 1 reload."
     )
 
     all_rows: list[tuple[Any, ...]] = []
-    for batch_no, start in enumerate(
-        range(0, need_total, batch_size), start=1
-    ):
+    for batch_no, start in enumerate(range(0, need_total, batch_size), start=1):
         batch_bans = consumed_bans[start : start + batch_size]
         batch_sql = oq.build_p_ban_h_sql(sql_template, batch_bans)
         messages.append(
@@ -567,34 +572,64 @@ def _remediate_p_ban_h_vts2(
         return entry
 
     messages.append(
-        f"  Removing consumed {need_total} P_BAN values from VTS 1 "
-        f"(keeping {len(remaining_bans)} existing values) …"
+        f"  Clearing VTS 1 P_BAN & P_SUBSCRIBER, then re-importing "
+        f"{len(remaining)} remaining pairs (consumed last {need_total}) …"
     )
-    trim = vts.replace_column_values(
-        VTS1_URL,
-        "P_BAN",
-        remaining_bans,
-        filename="P_BAN_remaining.txt",
-    )
-    entry["pBanTrim"] = trim
-    if not trim.get("verified"):
+    remaining_path = out_dir / "P_BAN_P_SUBSCRIBER_remaining.txt"
+    rem_lines = [",".join(source_headers)]
+    for ban, sub in remaining:
+        rem_lines.append(f"{ban},{sub}")
+    remaining_path.write_bytes(("\r\n".join(rem_lines) + "\r\n").encode("utf-8"))
+
+    for col in source_headers:
+        vts.clear_column(VTS1_URL, col)
+        entry["clearDetails"].append({"vts": "VTS 1", "column": col, "success": True})
+        messages.append(f"  Cleared VTS 1 — {col}: Passed")
+
+    if remaining:
+        reload = _import_vts_data(
+            VTS1_URL,
+            "VTS 1",
+            source_headers,
+            remaining,
+            remaining_path,
+            remaining_path.name,
+            messages,
+        )
+    else:
+        verify = vts.verify_column_counts(
+            VTS1_URL, {col: 0 for col in source_headers}
+        )
+        reload = {
+            "verified": bool(verify.get("verified")),
+            "message": "VTS 1 P_BAN/P_SUBSCRIBER cleared (no remaining pairs).",
+            "verification": verify,
+        }
+        messages.append(f"  {reload['message']}")
+
+    entry["vts1Reload"] = {
+        "txtFile": str(remaining_path.relative_to(proj)),
+        "rowCount": len(remaining),
+        "import": reload,
+    }
+    if not reload.get("verified"):
         entry["message"] = (
-            trim.get("message")
-            or "VTS2 import succeeded but VTS1 P_BAN trim failed verification."
+            reload.get("message")
+            or "VTS2 import succeeded but VTS1 P_BAN/P_SUBSCRIBER reload failed."
         )
         messages.append(f"  FAILED — {entry['message']}")
-        for row in (trim.get("verification") or {}).get("rows") or []:
+        for row in (reload.get("verification") or {}).get("rows") or []:
             messages.append(
-                f"    P_BAN trim — expected {row.get('expected')}, "
+                f"    {row.get('column')}: expected {row.get('expected')}, "
                 f"actual {row.get('actual')}"
             )
         return entry
 
     entry["success"] = True
     entry["message"] = (
-        f"Validation 6 complete — imported {row_count} rows into VTS 2 "
-        f"and trimmed VTS 1 P_BAN from {len(p_ban_values)} to "
-        f"{len(remaining_bans)}."
+        f"Validation 6 complete — imported {row_count} history rows into VTS 2; "
+        f"VTS 1 P_BAN/P_SUBSCRIBER reloaded with {len(remaining)} remaining pairs "
+        f"(removed last {need_total})."
     )
     messages.append(f"  {entry['message']}")
     return entry
