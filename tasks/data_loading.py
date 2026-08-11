@@ -5,6 +5,7 @@ Task 1 — Data loading: VTS pre-checks, validation, clear, and Oracle P_BAN rel
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -610,64 +611,109 @@ def _remediate_p_ban_h_vts2(
         entry["message"] = (
             f"Only {len(reserved_bans)} BAN values in reserved block; "
             f"need {need_total}."
+            f" VTS 1 P_BAN/P_SUBSCRIBER was already imported ({rem_count} rows)."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
-    # History query: first column only, 3 batches of 1000.
+    # History query: 1st column (BAN) only, 3×1000 — shared connection + optimized SQL.
     all_rows: list[tuple[Any, ...]] = []
     batch_count = oq.P_BAN_H_VTS2_BATCHES
-    for batch_no in range(1, batch_count + 1):
-        start = (batch_no - 1) * batch_size
-        batch_bans = reserved_bans[start : start + batch_size]
-        if len(batch_bans) < batch_size:
-            entry["message"] = (
-                f"Batch {batch_no} has only {len(batch_bans)} BANs; "
-                f"need {batch_size}."
+    messages.append(
+        f"  Starting P_BAN_H history Oracle ({batch_count} batches × {batch_size} BANs). "
+        "JOIN service_agreement is rewritten to EXISTS; numeric BAN IN-list used when possible."
+    )
+    hist_conn = None
+    try:
+        hist_conn = oq.open_oracle_connection(
+            call_timeout_ms=oq.P_BAN_H_CALL_TIMEOUT_MS
+        )
+        for batch_no in range(1, batch_count + 1):
+            start = (batch_no - 1) * batch_size
+            batch_bans = reserved_bans[start : start + batch_size]
+            if len(batch_bans) < batch_size:
+                entry["message"] = (
+                    f"Batch {batch_no} has only {len(batch_bans)} BANs; "
+                    f"need {batch_size}."
+                    f" VTS 1 already imported {rem_count} pairs."
+                )
+                messages.append(f"  FAILED — {entry['message']}")
+                return entry
+            try:
+                batch_sql = oq.build_p_ban_h_sql(history_sql_template, batch_bans)
+            except ValueError as exc:
+                entry["message"] = (
+                    f"{exc} VTS 1 already imported {rem_count} pairs."
+                )
+                messages.append(f"  FAILED — {exc}")
+                return entry
+            messages.append(
+                f"  Oracle history batch {batch_no}/{batch_count} "
+                f"(BANs {start + 1}-{start + len(batch_bans)}) …"
             )
-            messages.append(f"  FAILED — {entry['message']}")
-            return entry
-        try:
-            batch_sql = oq.build_p_ban_h_sql(history_sql_template, batch_bans)
-        except ValueError as exc:
-            entry["message"] = str(exc)
-            messages.append(f"  FAILED — {exc}")
-            return entry
-        messages.append(
-            f"  Oracle history batch {batch_no}/{batch_count} "
-            f"(BANs {start + 1}-{start + len(batch_bans)}) …"
-        )
-        try:
-            rows, _cols = oq.run_sql(batch_sql)
-        except Exception as exc:
-            err = str(exc)
-            entry["message"] = err
-            messages.append(f"  FAILED — Oracle batch {batch_no}: {err}")
-            if "ORA-01722" in err or "invalid number" in err.lower():
-                sample = ", ".join(batch_bans[:8])
-                messages.append(
-                    "  Hint: BANs must be numeric text for TO_CHAR(a.customer_id) IN (...). "
-                    f"Sample BANs: {sample}"
+            t0 = time.monotonic()
+            try:
+                rows, _cols = oq.run_sql(
+                    batch_sql,
+                    conn=hist_conn,
+                    call_timeout_ms=oq.P_BAN_H_CALL_TIMEOUT_MS,
                 )
-                messages.append(
-                    "  Ensure Oracle Queries for Validation 6 uses: "
-                    "WHERE TO_CHAR(a.customer_id) IN ({BAN_LIST})"
+            except Exception as exc:
+                err = str(exc)
+                elapsed = time.monotonic() - t0
+                entry["message"] = (
+                    f"Oracle history batch {batch_no} failed after {elapsed:.0f}s: {err}. "
+                    f"VTS 1 P_BAN/P_SUBSCRIBER already imported ({rem_count} rows); "
+                    "P_BAN_H was not imported."
                 )
-            return entry
-        messages.append(f"    Batch {batch_no} returned {len(rows)} row(s).")
-        entry["batches"].append(
-            {"batch": batch_no, "banCount": len(batch_bans), "rowCount": len(rows)}
-        )
-        all_rows.extend(rows)
+                messages.append(f"  FAILED — {entry['message']}")
+                if "ORA-01722" in err or "invalid number" in err.lower():
+                    sample = ", ".join(batch_bans[:8])
+                    messages.append(
+                        "  Hint: BANs must be numeric for a.customer_id IN (...). "
+                        f"Sample BANs: {sample}"
+                    )
+                if "DPI-1067" in err or "timeout" in err.lower():
+                    messages.append(
+                        "  Hint: history query timed out. In Oracle Queries, use EXISTS "
+                        "(not JOIN) on service_agreement, and keep {BAN_LIST}. "
+                        f"Or raise ORACLE_P_BAN_H_TIMEOUT_MS (now {oq.P_BAN_H_CALL_TIMEOUT_MS})."
+                    )
+                return entry
+            elapsed = time.monotonic() - t0
+            messages.append(
+                f"    Batch {batch_no} returned {len(rows)} row(s) in {elapsed:.1f}s."
+            )
+            entry["batches"].append(
+                {
+                    "batch": batch_no,
+                    "banCount": len(batch_bans),
+                    "rowCount": len(rows),
+                    "elapsedSec": round(elapsed, 1),
+                }
+            )
+            all_rows.extend(rows)
+    finally:
+        if hist_conn is not None:
+            try:
+                hist_conn.close()
+            except Exception:
+                pass
 
     if not all_rows:
-        entry["message"] = "Oracle P_BAN_H query returned no rows across all batches."
+        entry["message"] = (
+            "Oracle P_BAN_H query returned no rows across all batches. "
+            f"VTS 1 already imported {rem_count} pairs; P_BAN_H not imported."
+        )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
     headers, vts_rows = oq.rows_for_vts_import("p_ban_h_vts2", all_rows)
     if not vts_rows:
-        entry["message"] = "Could not parse query rows into 7 VTS history columns."
+        entry["message"] = (
+            "Could not parse query rows into 7 VTS history columns. "
+            f"VTS 1 already imported {rem_count} pairs; P_BAN_H not imported."
+        )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
@@ -693,7 +739,10 @@ def _remediate_p_ban_h_vts2(
     )
     entry["import"] = imp
     if not imp.get("verified"):
-        entry["message"] = imp.get("message") or "VTS import failed verification."
+        entry["message"] = (
+            (imp.get("message") or "VTS import failed verification.")
+            + f" VTS 1 already imported {rem_count} pairs; P_BAN_H import failed."
+        )
         messages.append(f"  FAILED — {entry['message']}")
         upload = imp.get("upload") or {}
         if upload.get("responseBody"):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -107,8 +108,10 @@ P_BAN_H_VTS2_TOTAL = 3000
 P_BAN_H_VTS2_BATCHES = 3
 P_BAN_H_BAN_LIST_PLACEHOLDER = "{BAN_LIST}"
 
+# EXISTS (not JOIN) on service_agreement avoids row explosion; numeric IN is
+# substituted at runtime when all BANs are digits (much faster than TO_CHAR).
 DEFAULT_P_BAN_H_VTS2_SQL = (
-    "SELECT DISTINCT(a.ban || ',' || b.subscriber_no || ',' || "
+    "SELECT DISTINCT a.ban || ',' || b.subscriber_no || ',' || "
     "(SELECT LISTAGG(DISTINCT REPLACE(c.unit_esn, ' ', ''), ',') "
     "WITHIN GROUP (ORDER BY c.unit_esn) FROM physical_device c "
     "WHERE c.customer_id = a.customer_id) || ',' || "
@@ -117,12 +120,11 @@ DEFAULT_P_BAN_H_VTS2_SQL = (
     "WHERE c.customer_id = a.customer_id) || ',' || "
     "(SELECT LISTAGG(DISTINCT REPLACE(c.imsi, ' ', ''), ',') "
     "WITHIN GROUP (ORDER BY c.imsi) FROM physical_device c "
-    "WHERE c.customer_id = a.customer_id)) "
+    "WHERE c.customer_id = a.customer_id) "
     "FROM billing_account a "
     "JOIN subscriber b ON a.customer_id = b.customer_id "
-    "JOIN service_agreement d ON d.ban = a.customer_id "
-    # TO_CHAR avoids ORA-01722 when customer_id is NUMBER and BAN list is text
-    f"WHERE TO_CHAR(a.customer_id) IN ({P_BAN_H_BAN_LIST_PLACEHOLDER})"
+    f"WHERE a.customer_id IN ({P_BAN_H_BAN_LIST_PLACEHOLDER}) "
+    "AND EXISTS (SELECT 1 FROM service_agreement d WHERE d.ban = a.customer_id)"
 )
 
 QUERY_KEYS = (
@@ -259,13 +261,30 @@ def queries_for_api() -> dict[str, Any]:
     }
 
 
-def run_sql(sql: str) -> tuple[list[tuple[Any, ...]], list[str]]:
+# Per-batch Oracle timeout for heavy P_BAN_H history queries (ms).
+P_BAN_H_CALL_TIMEOUT_MS = int(os.environ.get("ORACLE_P_BAN_H_TIMEOUT_MS", "900000"))
+
+
+def run_sql(
+    sql: str,
+    *,
+    conn: Any | None = None,
+    call_timeout_ms: int | None = None,
+) -> tuple[list[tuple[Any, ...]], list[str]]:
     text = (sql or "").strip().rstrip(";")
     if not text:
         raise ValueError("SQL query is empty.")
-    conn = connect()
+    owns_conn = conn is None
+    if owns_conn:
+        conn = connect()
     try:
+        if call_timeout_ms is not None:
+            try:
+                conn.call_timeout = int(call_timeout_ms)
+            except Exception:
+                pass
         with conn.cursor() as cur:
+            cur.arraysize = 1000
             cur.execute(text)
             if not cur.description:
                 return [], []
@@ -273,7 +292,19 @@ def run_sql(sql: str) -> tuple[list[tuple[Any, ...]], list[str]]:
             rows = [tuple(r) for r in cur.fetchall()]
             return rows, columns
     finally:
-        conn.close()
+        if owns_conn and conn is not None:
+            conn.close()
+
+
+def open_oracle_connection(*, call_timeout_ms: int | None = None) -> Any:
+    """Open a shared Oracle connection (caller must close)."""
+    conn = connect()
+    if call_timeout_ms is not None:
+        try:
+            conn.call_timeout = int(call_timeout_ms)
+        except Exception:
+            pass
+    return conn
 
 
 def split_p_sim_rows(
@@ -328,41 +359,100 @@ def normalize_ban_value(ban: Any) -> str | None:
     return text or None
 
 
-def build_ban_in_clause(bans: list[str]) -> str:
-    """Build quoted string IN-list of BAN values (for TO_CHAR comparisons)."""
-    quoted: list[str] = []
+def _unique_ban_values(bans: list[str]) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for ban in bans:
         text = normalize_ban_value(ban)
         if not text or text in seen:
             continue
         seen.add(text)
-        quoted.append("'" + text.replace("'", "''") + "'")
-    if not quoted:
+        out.append(text)
+    if not out:
         raise ValueError("BAN list is empty.")
-    return ",".join(quoted)
+    return out
+
+
+def build_ban_in_clause(bans: list[str], *, numeric: bool = False) -> str:
+    """
+    Build IN-list of BAN values.
+    numeric=True → bare digits for a.customer_id IN (…); faster index path.
+    numeric=False → quoted strings for TO_CHAR(a.customer_id) IN (…).
+    """
+    values = _unique_ban_values(bans)
+    if numeric:
+        for text in values:
+            if not text.isdigit():
+                raise ValueError(f"BAN is not numeric: {text}")
+        return ",".join(values)
+    return ",".join("'" + text.replace("'", "''") + "'" for text in values)
+
+
+def _rewrite_service_agreement_join_to_exists(sql: str) -> str:
+    """
+    JOIN service_agreement multiplies rows and makes LISTAGG + DISTINCT very slow.
+    Convert to EXISTS so each BAN/subscriber is evaluated once.
+
+    EXISTS is appended at the end of the main query (before a trailing ORDER BY),
+    never inside LISTAGG subqueries.
+    """
+    if re.search(r"(?i)\bEXISTS\s*\(\s*SELECT\s+1\s+FROM\s+service_agreement", sql):
+        # Already using EXISTS — still drop a redundant JOIN if present.
+        pattern = re.compile(
+            r"(?is)\s+JOIN\s+service_agreement\s+(\w+)\s+ON\s+\1\.ban\s*=\s*a\.customer_id"
+        )
+        return pattern.sub(" ", sql, count=1)
+
+    pattern = re.compile(
+        r"(?is)\s+JOIN\s+service_agreement\s+(\w+)\s+ON\s+\1\.ban\s*=\s*a\.customer_id"
+    )
+    match = pattern.search(sql)
+    if not match:
+        return sql
+    alias = match.group(1)
+    sql = pattern.sub(" ", sql, count=1)
+    exists_clause = (
+        f" AND EXISTS (SELECT 1 FROM service_agreement {alias} "
+        f"WHERE {alias}.ban = a.customer_id)"
+    )
+    # Attach to end of main query only (before final ORDER BY if present).
+    order_match = re.search(r"(?i)\s+ORDER\s+BY\b[\s\S]*$", sql)
+    if order_match:
+        return sql[: order_match.start()].rstrip() + exists_clause + order_match.group(0)
+    return sql.rstrip() + exists_clause
 
 
 def build_p_ban_h_sql(template: str, bans: list[str]) -> str:
     sql = (template or "").strip()
     if not sql:
         raise ValueError("P_BAN_H SQL template is empty.")
-    clause = build_ban_in_clause(bans)
 
-    # Avoid ORA-01722: never compare NUMBER customer_id / ban to unvalidated strings
-    sql = re.sub(
-        r"(?i)\b(a\.)?customer_id\s+IN\s*\(",
-        "TO_CHAR(a.customer_id) IN (",
-        sql,
-        count=1,
-    )
-    # If template already had TO_CHAR(a.customer_id), the regex above may have
-    # created TO_CHAR(TO_CHAR(...)) — normalize that.
-    sql = re.sub(
-        r"(?i)TO_CHAR\s*\(\s*TO_CHAR\s*\(\s*a\.customer_id\s*\)\s*\)",
-        "TO_CHAR(a.customer_id)",
-        sql,
-    )
+    sql = _rewrite_service_agreement_join_to_exists(sql)
+    values = _unique_ban_values(bans)
+    use_numeric = all(v.isdigit() for v in values)
+    clause = build_ban_in_clause(values, numeric=use_numeric)
+
+    if use_numeric:
+        # Prefer indexed NUMBER compare when BANs are clean digits.
+        sql = re.sub(
+            r"(?i)TO_CHAR\s*\(\s*a\.customer_id\s*\)\s+IN\s*\(",
+            "a.customer_id IN (",
+            sql,
+            count=1,
+        )
+    else:
+        # Avoid ORA-01722 for non-numeric BAN text.
+        sql = re.sub(
+            r"(?i)\ba\.customer_id\s+IN\s*\(",
+            "TO_CHAR(a.customer_id) IN (",
+            sql,
+            count=1,
+        )
+        sql = re.sub(
+            r"(?i)TO_CHAR\s*\(\s*TO_CHAR\s*\(\s*a\.customer_id\s*\)\s*\)",
+            "TO_CHAR(a.customer_id)",
+            sql,
+        )
 
     if P_BAN_H_BAN_LIST_PLACEHOLDER in sql:
         return sql.replace(P_BAN_H_BAN_LIST_PLACEHOLDER, clause)
@@ -372,7 +462,6 @@ def build_p_ban_h_sql(template: str, bans: list[str]) -> str:
             end = sql.find(")", start)
             if end > start:
                 return sql[: start + 4] + clause + sql[end:]
-    # Replace last IN (...) content for customer_id / ban filters
     upper = sql.upper()
     start = upper.rfind(" IN (")
     if start >= 0:

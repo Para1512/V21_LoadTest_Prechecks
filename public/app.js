@@ -1659,7 +1659,7 @@ async function openOracleQueriesEditor() {
   const hint = document.createElement("p");
   hint.className = "oracle-queries-hint";
   hint.textContent =
-    "Edit SQL used when VTS validation fails. Trigger 1+6 uses P_BAN query then P_BAN_H in 3x1000 batches — keep {BAN_LIST} in the history query.";
+    "Edit SQL used when VTS validation fails. Trigger 1+6: P_BAN query, then P_BAN_H in 3×1000 batches. Keep {BAN_LIST}. Prefer EXISTS (not JOIN) on service_agreement — JOIN is auto-rewritten at runtime.";
   panel.appendChild(hint);
   const form = document.createElement("div");
   form.className = "oracle-queries-form";
