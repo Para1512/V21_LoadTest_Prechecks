@@ -92,6 +92,124 @@ def remediation_issues(
 vts1_remediation_issues = remediation_issues
 
 
+# User-facing guidance when a trigger still fails after Oracle re-run / prep.
+TRIGGER_GUIDANCE: list[dict[str, Any]] = [
+    {
+        "id": "trigger_1_6",
+        "label": "Trigger 1 / 6 - P_BAN, P_SUBSCRIBER & P_BAN_H",
+        "message": (
+            "Change SKU in the query as current SKU & PP combination has not enough data "
+            "or start data PREP."
+        ),
+        "issue_keys": ("p_ban_h_vts2", "ban_subscriber"),
+        "validation_ids": ("vts1-ban-subscriber", "vts2-history", "vts2-p_ban_h"),
+        "columns": ("P_BAN", "P_SUBSCRIBER", "P_BAN_H"),
+    },
+    {
+        "id": "trigger_2",
+        "label": "Trigger 2 - P_SIM",
+        "message": "Not enough SIM data is available in DB or change item_ID.",
+        "issue_keys": ("p_sim",),
+        "validation_ids": ("vts1-p_sim", "vts2-p_sim"),
+        "columns": ("P_SIM",),
+    },
+    {
+        "id": "trigger_3",
+        "label": "Trigger 3 - P_IMEI_IP14128PUR",
+        "message": "Not enough data for current model, pls change SKU.",
+        "issue_keys": ("p_imei_ip14128pur",),
+        "validation_ids": ("vts1-p_imei_ip14128pur",),
+        "columns": ("P_IMEI_IP14128PUR",),
+    },
+    {
+        "id": "trigger_4",
+        "label": "Trigger 4 - P_BAN_C (cancelled BANs)",
+        "message": "Not enough data for cancelled Ban's, pls create data.",
+        "issue_keys": ("p_ban_c_vts2",),
+        "validation_ids": ("vts2-current",),
+        "columns": ("P_BAN_C",),
+    },
+    {
+        "id": "trigger_5",
+        "label": "Trigger 5 - P_NEW_IMEI",
+        "message": "Not enough data for current model, pls change SKU.",
+        "issue_keys": ("p_new_imei_vts2",),
+        "validation_ids": ("vts2-p_new_imei",),
+        "columns": ("P_NEW_IMEI",),
+    },
+]
+
+
+def build_user_guidance(
+    precheck: dict[str, Any] | None = None,
+    prep: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Map still-failing columns/validations to short operator guidance messages."""
+    failed_columns: set[str] = set()
+    failed_validation_ids: set[str] = set()
+    if precheck:
+        failed_columns.update(precheck.get("vts1", {}).get("failedColumns") or [])
+        failed_columns.update(precheck.get("vts2", {}).get("failedColumns") or [])
+    if prep:
+        for v in prep.get("validationDetails") or []:
+            if not v.get("passed"):
+                failed_validation_ids.add(str(v.get("id") or ""))
+                for row in v.get("rows") or []:
+                    col = row.get("column")
+                    if col and row.get("passed") is False:
+                        failed_columns.add(str(col))
+
+    issue_keys = set(remediation_issues(precheck=precheck, prep=prep))
+    guidance: list[dict[str, Any]] = []
+    for item in TRIGGER_GUIDANCE:
+        hit = bool(issue_keys.intersection(item["issue_keys"]))
+        hit = hit or bool(failed_validation_ids.intersection(item["validation_ids"]))
+        hit = hit or bool(failed_columns.intersection(item["columns"]))
+        if hit:
+            guidance.append(
+                {
+                    "id": item["id"],
+                    "label": item["label"],
+                    "message": item["message"],
+                }
+            )
+    return guidance
+
+
+def build_validation_summary(
+    precheck: dict[str, Any] | None = None,
+    prep: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Clean validation rows for UI (no technical log noise)."""
+    rows: list[dict[str, Any]] = []
+    if precheck:
+        for side, label in (("vts1", "VTS 1 pre-check"), ("vts2", "VTS 2 pre-check")):
+            block = precheck.get(side) or {}
+            for check in block.get("checks") or []:
+                rows.append(
+                    {
+                        "group": label,
+                        "name": check.get("column"),
+                        "count": check.get("count"),
+                        "required": check.get("required"),
+                        "passed": bool(check.get("ok")),
+                    }
+                )
+    if prep:
+        for v in prep.get("validationDetails") or []:
+            rows.append(
+                {
+                    "group": "Validation",
+                    "name": v.get("name") or v.get("id"),
+                    "count": v.get("referenceCount"),
+                    "required": v.get("rule"),
+                    "passed": bool(v.get("passed")),
+                    "message": v.get("message") or "",
+                }
+            )
+    return rows
+
+
 def _import_vts_data(
     base_url: str,
     vts_label: str,
@@ -1055,8 +1173,11 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
             "success": False,
             "phase": "insufficient",
             "precheck": precheck,
+            "prep": None,
             "remediation": remediation_runs,
             "messages": messages,
+            "guidance": build_user_guidance(precheck=precheck),
+            "validationSummary": build_validation_summary(precheck=precheck),
             "queryDefaults": query_defaults(),
         }
 
@@ -1081,6 +1202,10 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
                 "prep": prep,
                 "remediation": remediation_runs,
                 "messages": messages,
+                "guidance": build_user_guidance(precheck=precheck, prep=prep),
+                "validationSummary": build_validation_summary(
+                    precheck=precheck, prep=prep
+                ),
                 "queryDefaults": query_defaults(),
             }
 
@@ -1091,6 +1216,8 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
         "prep": prep,
         "remediation": remediation_runs,
         "messages": messages,
+        "guidance": [],
+        "validationSummary": build_validation_summary(precheck=precheck, prep=prep),
         "queryDefaults": query_defaults(),
     }
 

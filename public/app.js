@@ -694,75 +694,217 @@ function renderVtsClearSection(clearDetails) {
   return wrap;
 }
 
-function renderDataLoadingVts(od) {
-  const root = document.createElement("div");
-  root.className = "task-output data-loading-vts";
+function renderCleanValidationSummary(summary) {
+  const wrap = document.createElement("div");
+  wrap.className = "data-loading-vts-block";
+  const h = document.createElement("div");
+  h.className = "disk-header";
+  h.textContent = "Validations";
+  wrap.appendChild(h);
+
+  if (!summary?.length) {
+    const empty = document.createElement("p");
+    empty.className = "data-loading-vts-meta";
+    empty.textContent = "No validation results.";
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  const table = document.createElement("table");
+  table.className = "data-loading-vts-table";
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  ["Group", "Check", "Count / Rule", "Status"].forEach((label) => {
+    const th = document.createElement("th");
+    th.textContent = label;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  summary.forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.className = row.passed ? "data-loading-vts-row-pass" : "data-loading-vts-row-fail";
+    const ruleText =
+      row.required != null && row.count != null && typeof row.required === "number"
+        ? `${row.count} (need >= ${row.required})`
+        : row.required != null
+          ? String(row.required)
+          : row.count != null
+            ? String(row.count)
+            : "—";
+    [
+      row.group || "—",
+      row.name || "—",
+      ruleText,
+      row.passed ? "PASSED" : "FAILED"
+    ].forEach((cell, idx) => {
+      const td = document.createElement("td");
+      td.textContent = String(cell);
+      if (idx === 3) {
+        td.className = row.passed ? "data-loading-vts-safe" : "data-loading-vts-unsafe";
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function renderGuidanceSection(guidance) {
+  const wrap = document.createElement("div");
+  wrap.className = "data-loading-guidance";
+  const h = document.createElement("div");
+  h.className = "disk-header";
+  h.textContent = "What to do next";
+  wrap.appendChild(h);
+  (guidance || []).forEach((g) => {
+    const card = document.createElement("div");
+    card.className = "data-loading-guidance-card";
+    const title = document.createElement("div");
+    title.className = "data-loading-guidance-title";
+    title.textContent = g.label || g.id || "Trigger";
+    card.appendChild(title);
+    const msg = document.createElement("p");
+    msg.className = "data-loading-guidance-msg";
+    msg.textContent = g.message || "";
+    card.appendChild(msg);
+    wrap.appendChild(card);
+  });
+  return wrap;
+}
+
+function openTask1LogsModal(od) {
+  const existing = document.getElementById("task1-logs-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "task1-logs-overlay";
+  overlay.className = "oracle-queries-overlay";
+  const panel = document.createElement("div");
+  panel.className = "oracle-queries-panel task1-logs-panel";
+
+  const title = document.createElement("h3");
+  title.textContent = "Task 1 — detailed logs";
+  panel.appendChild(title);
+
+  const hint = document.createElement("p");
+  hint.className = "data-loading-vts-meta";
+  hint.textContent =
+    "Column counts, remediation details, and full run log. Close when done.";
+  panel.appendChild(hint);
+
   const prep = od.prep;
-
-  const intro = document.createElement("p");
-  intro.className = "data-loading-intro";
-  if (od.phase === "checking") {
-    intro.textContent = "Querying VTS 1 and VTS 2 (get_page) for column counts…";
-  } else if (od.phase === "preparing") {
-    intro.textContent = "Validating column alignment and clearing old test data…";
-  } else if (od.phase === "prep-done") {
-    intro.textContent = "Task 1 completed — VTS prep finished successfully.";
-  } else if (od.phase === "error" && prep) {
-    intro.textContent = prep.message || od.message || "VTS prep failed.";
-  } else if (od.phase === "remediating") {
-    intro.textContent = "VTS 1 validation failed — running Oracle extract and VTS import…";
-  } else if (od.phase === "insufficient" || (od.phase === "error" && od.remediation?.length)) {
-    intro.textContent =
-      "Auto remediation ran but VTS 1 still failed. Review remediation details below, adjust SQL via Oracle Queries, then RUN Task 1 again.";
-  } else if (od.precheck && !od.precheck.canProceed) {
-    intro.textContent =
-      "Pre-check failed. Review details below.";
-  } else {
-    intro.textContent = od.message || prep?.message || "VTS step finished.";
-  }
-  root.appendChild(intro);
-
-  if (od.remediation?.length) {
-    root.appendChild(renderVtsRemediationSection(od.remediation));
-  }
-
   if (od.precheck) {
     const preHdr = document.createElement("div");
     preHdr.className = "disk-header";
-    preHdr.textContent = "Pre-check details";
-    root.appendChild(preHdr);
+    preHdr.textContent = "Pre-check counts";
+    panel.appendChild(preHdr);
     if (od.precheck.vts1) {
-      root.appendChild(renderVtsCountTable("VTS 1 (port 2244)", od.precheck.vts1));
+      panel.appendChild(renderVtsCountTable("VTS 1 (port 2244)", od.precheck.vts1));
     }
     if (od.precheck.vts2) {
-      root.appendChild(renderVtsCountTable("VTS 2 (port 2245)", od.precheck.vts2));
+      panel.appendChild(renderVtsCountTable("VTS 2 (port 2245)", od.precheck.vts2));
     }
-    root.appendChild(renderVtsPrecheckSummary(od.precheck));
   }
 
   if (prep?.dataDetails) {
     const dataHdr = document.createElement("div");
     dataHdr.className = "disk-header";
-    dataHdr.textContent = "Data details (countsPerColumn)";
-    root.appendChild(dataHdr);
+    dataHdr.textContent = "Data details (counts per column)";
+    panel.appendChild(dataHdr);
     if (prep.dataDetails.vts1) {
-      root.appendChild(
+      panel.appendChild(
         renderVtsCountsTable(prep.dataDetails.vts1.label || "VTS 1", prep.dataDetails.vts1.counts)
       );
     }
     if (prep.dataDetails.vts2) {
-      root.appendChild(
+      panel.appendChild(
         renderVtsCountsTable(prep.dataDetails.vts2.label || "VTS 2", prep.dataDetails.vts2.counts)
       );
     }
   }
 
   if (prep?.validationDetails?.length) {
-    root.appendChild(renderVtsValidationSection(prep.validationDetails));
+    panel.appendChild(renderVtsValidationSection(prep.validationDetails));
+  }
+
+  if (od.remediation?.length) {
+    panel.appendChild(renderVtsRemediationSection(od.remediation));
   }
 
   if (prep && (prep.clearDetails?.length || prep.prepCompleted)) {
-    root.appendChild(renderVtsClearSection(prep.clearDetails || []));
+    panel.appendChild(renderVtsClearSection(prep.clearDetails || []));
+  }
+
+  const logLines = od.messages?.length
+    ? od.messages
+    : prep?.messages?.length
+      ? prep.messages
+      : [];
+  if (logLines.length) {
+    const logTitle = document.createElement("div");
+    logTitle.className = "log-space-pro-subtitle";
+    logTitle.textContent = "Full log";
+    panel.appendChild(logTitle);
+    const pre = document.createElement("pre");
+    pre.className = "task-output task1-logs-pre";
+    pre.textContent = logLines.join("\n");
+    panel.appendChild(pre);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "oracle-queries-actions";
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "Close";
+  closeBtn.addEventListener("click", () => overlay.remove());
+  actions.appendChild(closeBtn);
+  panel.appendChild(actions);
+
+  overlay.appendChild(panel);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+}
+
+function renderDataLoadingVts(od) {
+  const root = document.createElement("div");
+  root.className = "task-output data-loading-vts";
+  const prep = od.prep;
+  const guidance = od.guidance || [];
+  const failed =
+    od.phase === "insufficient" ||
+    od.phase === "error" ||
+    guidance.length > 0 ||
+    (od.validationSummary || []).some((r) => !r.passed);
+
+  const intro = document.createElement("p");
+  intro.className = "data-loading-intro";
+  if (od.phase === "checking") {
+    intro.textContent = "Checking VTS column counts…";
+  } else if (od.phase === "prep-done") {
+    intro.textContent = "Task 1 completed — all validations passed.";
+  } else if (failed) {
+    intro.textContent =
+      "Some validations still failed after the data reload. Follow the guidance below.";
+  } else {
+    intro.textContent = od.message || prep?.message || "VTS step finished.";
+  }
+  root.appendChild(intro);
+
+  if (guidance.length) {
+    root.appendChild(renderGuidanceSection(guidance));
+  }
+
+  if (od.validationSummary?.length) {
+    root.appendChild(renderCleanValidationSummary(od.validationSummary));
+  } else if (prep?.validationDetails?.length) {
+    // Fallback if older payload without summary
+    root.appendChild(renderVtsValidationSection(prep.validationDetails));
   }
 
   if (prep?.prepCompleted) {
@@ -772,21 +914,22 @@ function renderDataLoadingVts(od) {
     root.appendChild(done);
   }
 
-  const logLines =
-    prep?.messages?.length || od.phase === "prep-done"
-      ? od.messages?.length
-        ? od.messages
-        : prep?.messages
-      : null;
-  if (logLines?.length) {
-    const logTitle = document.createElement("div");
-    logTitle.className = "log-space-pro-subtitle";
-    logTitle.textContent = "Full log";
-    root.appendChild(logTitle);
-    const pre = document.createElement("pre");
-    pre.className = "task-output";
-    pre.textContent = logLines.join("\n");
-    root.appendChild(pre);
+  const hasLogData =
+    failed ||
+    od.messages?.length ||
+    od.remediation?.length ||
+    od.precheck ||
+    prep?.dataDetails;
+  if (hasLogData) {
+    const bar = document.createElement("div");
+    bar.className = "data-loading-logs-bar";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "data-loading-logs-btn";
+    btn.textContent = failed ? "View logs (counts & details)" : "View logs";
+    btn.addEventListener("click", () => openTask1LogsModal(od));
+    bar.appendChild(btn);
+    root.appendChild(bar);
   }
 
   return root;
@@ -1545,27 +1688,32 @@ async function runServerLogSpaceTask() {
 
 function applyTask1FlowResult(flow) {
   const phase = flow.phase || (flow.success ? "prep-done" : "error");
+  const guidance = flow.guidance || [];
   const output =
-    flow.prep?.message ||
-    flow.message ||
-    (phase === "prep-done"
-      ? "Task 1 completed — VTS prep finished."
-      : phase === "insufficient"
-        ? "VTS columns do not meet minimum counts."
-        : "Task 1 finished with errors.");
+    phase === "prep-done"
+      ? "Task 1 completed — all validations passed."
+      : guidance.length
+        ? guidance.map((g) => g.message).join(" ")
+        : flow.prep?.message ||
+          flow.message ||
+          (phase === "insufficient"
+            ? "Validations failed after data reload."
+            : "Task 1 finished with errors.");
   updateTask(1, {
     status: "Completed",
     skipped: false,
     output,
     outputType: "data-loading-vts",
-      outputData: {
-        phase,
-        precheck: flow.precheck,
-        prep: flow.prep,
-        remediation: flow.remediation || [],
-        queryDefaults: flow.queryDefaults,
-        messages: flow.messages || []
-      },
+    outputData: {
+      phase,
+      precheck: flow.precheck,
+      prep: flow.prep,
+      remediation: flow.remediation || [],
+      queryDefaults: flow.queryDefaults,
+      messages: flow.messages || [],
+      guidance,
+      validationSummary: flow.validationSummary || []
+    },
     expanded: true
   });
 }

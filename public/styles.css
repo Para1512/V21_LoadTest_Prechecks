@@ -773,6 +773,55 @@ button:disabled {
   font-weight: 700;
 }
 
+.data-loading-guidance {
+  margin: 12px 0 16px;
+}
+.data-loading-guidance-card {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.data-loading-guidance-title {
+  font-weight: 700;
+  color: #991b1b;
+  margin-bottom: 4px;
+  font-size: 0.92rem;
+}
+.data-loading-guidance-msg {
+  margin: 0;
+  color: #7f1d1d;
+  line-height: 1.45;
+  font-size: 0.9rem;
+}
+.data-loading-logs-bar {
+  margin-top: 14px;
+}
+.data-loading-logs-btn {
+  border: 1px solid #94a3b8;
+  background: #f8fafc;
+  color: #0f172a;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.data-loading-logs-btn:hover {
+  background: #e2e8f0;
+}
+.task1-logs-panel {
+  max-width: min(920px, 96vw);
+  max-height: 85vh;
+  overflow: auto;
+}
+.task1-logs-pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 0.8rem;
+}
+
 .data-loading-intro {
   line-height: 1.45;
   color: #334155;
