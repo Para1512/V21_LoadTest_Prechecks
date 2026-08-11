@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -99,14 +100,36 @@ def _import_vts_data(
     txt_path: Path,
     filename: str,
     messages: list[str],
+    *,
+    quick: bool = False,
 ) -> dict[str, Any]:
     """POST /data/import_csv (fileToUpload) with Oracle rows; fall back to saved TXT."""
     messages.append(f"  Importing into {vts_label} (POST /data/import_csv) …")
-    imp = vts.import_oracle_rows(base_url, headers, vts_rows, filename=filename)
+    imp = vts.import_oracle_rows(
+        base_url, headers, vts_rows, filename=filename, quick=quick
+    )
     if not imp.get("verified"):
         messages.append(f"  Direct import failed on {vts_label} — retrying from TXT …")
-        imp = vts.import_csv_file(base_url, txt_path, headers)
+        imp = vts.import_csv_file(base_url, txt_path, headers, quick=quick)
     return imp
+
+
+def _run_history_batch(
+    history_sql_template: str,
+    batch_no: int,
+    batch_bans: list[str],
+) -> dict[str, Any]:
+    """Run one P_BAN_H Oracle batch (1000 BANs) on its own connection."""
+    batch_sql = oq.build_p_ban_h_sql(history_sql_template, batch_bans)
+    t0 = time.monotonic()
+    rows, _cols = oq.run_sql(batch_sql)
+    return {
+        "batch": batch_no,
+        "banCount": len(batch_bans),
+        "rowCount": len(rows),
+        "elapsedSec": round(time.monotonic() - t0, 1),
+        "rows": rows,
+    }
 
 
 def _remediate_p_sim_dual(
@@ -489,13 +512,12 @@ def _remediate_p_ban_h_vts2(
     messages: list[str],
 ) -> dict[str, Any]:
     """
-    Combined Trigger 1 + Validation 6 (P_BAN / P_SUBSCRIBER + P_BAN_H history):
-    Trigger: P_BAN/P_SUBSCRIBER fail OR P_BAN_H / history fail.
-    1) Clear VTS1 P_BAN,P_SUBSCRIBER and all VTS2 history columns
-    2) Run P_BAN Oracle query
-    3) Reserve last 3000 pairs for history; import remaining to VTS1
-    4) Use 1st column (BAN) of reserved 3000 in 3x1000 history Oracle batches
-    5) Write combined history TXT → import VTS2
+    Combined Trigger 1 + Validation 6:
+    1) Clear VTS1 P_BAN/P_SUBSCRIBER + VTS2 history columns
+    2) Run P_BAN Oracle query; reserve last 3000 BANs for history
+    3) Import remaining pairs to VTS1
+    4) Run history SQL 3× in parallel (1000 BANs each)
+    5) Combine ~3000 output rows → one file → import VTS2 once
     """
     meta = oq.QUERY_META["p_ban_h_vts2"]
     history_columns = list(meta["clearColumns"])
@@ -550,13 +572,78 @@ def _remediate_p_ban_h_vts2(
     reserved = paired[-need_total:]
     remaining = paired[:-need_total]
     reserved_bans = [str(row[0]).strip() for row in reserved if str(row[0] or "").strip()]
+    batch_count = oq.P_BAN_H_VTS2_BATCHES
+    if len(reserved_bans) < need_total:
+        entry["message"] = (
+            f"Only {len(reserved_bans)} BAN values in reserved block; need {need_total}."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    # Prepare 3×1000 BAN batches (1st column only from reserved pairs).
+    history_batches: list[tuple[int, list[str]]] = []
+    for batch_no in range(1, batch_count + 1):
+        start = (batch_no - 1) * batch_size
+        batch_bans = reserved_bans[start : start + batch_size]
+        if len(batch_bans) < batch_size:
+            entry["message"] = (
+                f"Batch {batch_no} has only {len(batch_bans)} BANs; need {batch_size}."
+            )
+            messages.append(f"  FAILED — {entry['message']}")
+            return entry
+        history_batches.append((batch_no, batch_bans))
+
     messages.append(
-        f"  Reserved last {need_total} pairs for P_BAN_H "
-        f"({batch_size} BANs x {oq.P_BAN_H_VTS2_BATCHES} batches); "
-        f"importing {len(remaining)} remaining pairs to VTS 1 P_BAN/P_SUBSCRIBER."
+        f"  P_BAN_H: run history query {batch_count} times × {batch_size} BANs "
+        f"(in parallel), combine output, import once to VTS 2. "
+        f"Also importing {len(remaining)} remaining pairs to VTS 1."
     )
 
-    # Import remaining (everything except last 3000) to VTS1.
+    # Run 3 history queries in parallel while VTS1 import runs.
+    all_rows: list[tuple[Any, ...]] = []
+    batch_results: list[dict[str, Any]] = []
+    history_error: str | None = None
+
+    def _collect_history() -> None:
+        nonlocal all_rows, batch_results, history_error
+        ordered: dict[int, dict[str, Any]] = {}
+        try:
+            with ThreadPoolExecutor(max_workers=batch_count) as pool:
+                futures = {
+                    pool.submit(
+                        _run_history_batch,
+                        history_sql_template,
+                        batch_no,
+                        batch_bans,
+                    ): batch_no
+                    for batch_no, batch_bans in history_batches
+                }
+                for fut in as_completed(futures):
+                    batch_no = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as exc:
+                        history_error = f"Oracle history batch {batch_no} failed: {exc}"
+                        return
+                    ordered[batch_no] = result
+                    messages.append(
+                        f"  History batch {batch_no}/{batch_count}: "
+                        f"{result['rowCount']} row(s) in {result['elapsedSec']}s."
+                    )
+            for batch_no in range(1, batch_count + 1):
+                result = ordered[batch_no]
+                batch_results.append(
+                    {
+                        "batch": batch_no,
+                        "banCount": result["banCount"],
+                        "rowCount": result["rowCount"],
+                        "elapsedSec": result["elapsedSec"],
+                    }
+                )
+                all_rows.extend(result["rows"])
+        except Exception as exc:
+            history_error = str(exc)
+
     remaining_path = out_dir / "P_BAN_P_SUBSCRIBER.txt"
     rem_lines = [",".join(source_headers)]
     for ban, sub in remaining:
@@ -568,150 +655,68 @@ def _remediate_p_ban_h_vts2(
         f"{','.join(source_headers)})."
     )
 
-    if remaining:
-        vts1_imp = _import_vts_data(
-            VTS1_URL,
-            "VTS 1",
-            source_headers,
-            remaining,
-            remaining_path,
-            remaining_path.name,
-            messages,
-        )
-    else:
-        verify = vts.verify_column_counts(
-            VTS1_URL, {col: 0 for col in source_headers}
-        )
-        vts1_imp = {
-            "verified": bool(verify.get("verified")),
-            "message": "VTS 1 left empty (all pairs reserved for P_BAN_H).",
-            "verification": verify,
-        }
-        messages.append(f"  {vts1_imp['message']}")
+    with ThreadPoolExecutor(max_workers=1) as hist_pool:
+        hist_future = hist_pool.submit(_collect_history)
+
+        if remaining:
+            vts1_imp = _import_vts_data(
+                VTS1_URL,
+                "VTS 1",
+                source_headers,
+                remaining,
+                remaining_path,
+                remaining_path.name,
+                messages,
+                quick=True,
+            )
+        else:
+            verify = vts.verify_column_counts(
+                VTS1_URL, {col: 0 for col in source_headers}
+            )
+            vts1_imp = {
+                "verified": bool(verify.get("verified")),
+                "message": "VTS 1 left empty (all pairs reserved for P_BAN_H).",
+                "verification": verify,
+            }
+            messages.append(f"  {vts1_imp['message']}")
+
+        hist_future.result()
 
     entry["vts1Import"] = {
         "txtFile": str(remaining_path.relative_to(proj)),
         "rowCount": rem_count,
         "import": vts1_imp,
     }
+    entry["batches"] = batch_results
+
     if not vts1_imp.get("verified"):
         entry["message"] = (
-            vts1_imp.get("message")
-            or "VTS 1 P_BAN/P_SUBSCRIBER import failed."
+            vts1_imp.get("message") or "VTS 1 P_BAN/P_SUBSCRIBER import failed."
         )
         messages.append(f"  FAILED — {entry['message']}")
-        for row in (vts1_imp.get("verification") or {}).get("rows") or []:
-            messages.append(
-                f"    {row.get('column')}: expected {row.get('expected')}, "
-                f"actual {row.get('actual')}"
-            )
         return entry
 
-    if len(reserved_bans) < need_total:
+    if history_error:
         entry["message"] = (
-            f"Only {len(reserved_bans)} BAN values in reserved block; "
-            f"need {need_total}."
-            f" VTS 1 P_BAN/P_SUBSCRIBER was already imported ({rem_count} rows)."
+            f"{history_error} VTS 1 already imported {rem_count} pairs; "
+            "P_BAN_H was not imported."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
-
-    # History query: 1st column (BAN) only, 3×1000 — shared connection + optimized SQL.
-    all_rows: list[tuple[Any, ...]] = []
-    batch_count = oq.P_BAN_H_VTS2_BATCHES
-    messages.append(
-        f"  Starting P_BAN_H history Oracle ({batch_count} batches × {batch_size} BANs). "
-        "JOIN service_agreement is rewritten to EXISTS; numeric BAN IN-list used when possible."
-    )
-    hist_conn = None
-    try:
-        hist_conn = oq.open_oracle_connection(
-            call_timeout_ms=oq.P_BAN_H_CALL_TIMEOUT_MS
-        )
-        for batch_no in range(1, batch_count + 1):
-            start = (batch_no - 1) * batch_size
-            batch_bans = reserved_bans[start : start + batch_size]
-            if len(batch_bans) < batch_size:
-                entry["message"] = (
-                    f"Batch {batch_no} has only {len(batch_bans)} BANs; "
-                    f"need {batch_size}."
-                    f" VTS 1 already imported {rem_count} pairs."
-                )
-                messages.append(f"  FAILED — {entry['message']}")
-                return entry
-            try:
-                batch_sql = oq.build_p_ban_h_sql(history_sql_template, batch_bans)
-            except ValueError as exc:
-                entry["message"] = (
-                    f"{exc} VTS 1 already imported {rem_count} pairs."
-                )
-                messages.append(f"  FAILED — {exc}")
-                return entry
-            messages.append(
-                f"  Oracle history batch {batch_no}/{batch_count} "
-                f"(BANs {start + 1}-{start + len(batch_bans)}) …"
-            )
-            t0 = time.monotonic()
-            try:
-                rows, _cols = oq.run_sql(
-                    batch_sql,
-                    conn=hist_conn,
-                    call_timeout_ms=oq.P_BAN_H_CALL_TIMEOUT_MS,
-                )
-            except Exception as exc:
-                err = str(exc)
-                elapsed = time.monotonic() - t0
-                entry["message"] = (
-                    f"Oracle history batch {batch_no} failed after {elapsed:.0f}s: {err}. "
-                    f"VTS 1 P_BAN/P_SUBSCRIBER already imported ({rem_count} rows); "
-                    "P_BAN_H was not imported."
-                )
-                messages.append(f"  FAILED — {entry['message']}")
-                if "ORA-01722" in err or "invalid number" in err.lower():
-                    sample = ", ".join(batch_bans[:8])
-                    messages.append(
-                        "  Hint: BANs must be numeric for a.customer_id IN (...). "
-                        f"Sample BANs: {sample}"
-                    )
-                if "DPI-1067" in err or "timeout" in err.lower():
-                    messages.append(
-                        "  Hint: history query timed out. In Oracle Queries, use EXISTS "
-                        "(not JOIN) on service_agreement, and keep {BAN_LIST}. "
-                        f"Or raise ORACLE_P_BAN_H_TIMEOUT_MS (now {oq.P_BAN_H_CALL_TIMEOUT_MS})."
-                    )
-                return entry
-            elapsed = time.monotonic() - t0
-            messages.append(
-                f"    Batch {batch_no} returned {len(rows)} row(s) in {elapsed:.1f}s."
-            )
-            entry["batches"].append(
-                {
-                    "batch": batch_no,
-                    "banCount": len(batch_bans),
-                    "rowCount": len(rows),
-                    "elapsedSec": round(elapsed, 1),
-                }
-            )
-            all_rows.extend(rows)
-    finally:
-        if hist_conn is not None:
-            try:
-                hist_conn.close()
-            except Exception:
-                pass
 
     if not all_rows:
         entry["message"] = (
-            "Oracle P_BAN_H query returned no rows across all batches. "
+            "Oracle history query returned no rows across 3 batches. "
             f"VTS 1 already imported {rem_count} pairs; P_BAN_H not imported."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
+    # Combine ~3000 output rows → one file → one VTS2 import.
     headers, vts_rows = oq.rows_for_vts_import("p_ban_h_vts2", all_rows)
     if not vts_rows:
         entry["message"] = (
-            "Could not parse query rows into 7 VTS history columns. "
+            "Could not parse history query rows into 7 VTS columns. "
             f"VTS 1 already imported {rem_count} pairs; P_BAN_H not imported."
         )
         messages.append(f"  FAILED — {entry['message']}")
@@ -724,8 +729,8 @@ def _remediate_p_ban_h_vts2(
     entry["txtFile"] = str(txt_path.relative_to(proj))
     entry["rowCount"] = row_count
     messages.append(
-        f"  Wrote {meta['txtFile']} ({row_count} data rows + header "
-        f"{','.join(headers)})."
+        f"  Combined history output: {row_count} row(s) → {meta['txtFile']} "
+        f"(header {','.join(headers)})."
     )
 
     imp = _import_vts_data(
@@ -736,6 +741,7 @@ def _remediate_p_ban_h_vts2(
         txt_path,
         meta["txtFile"],
         messages,
+        quick=True,
     )
     entry["import"] = imp
     if not imp.get("verified"):
@@ -744,21 +750,12 @@ def _remediate_p_ban_h_vts2(
             + f" VTS 1 already imported {rem_count} pairs; P_BAN_H import failed."
         )
         messages.append(f"  FAILED — {entry['message']}")
-        upload = imp.get("upload") or {}
-        if upload.get("responseBody"):
-            messages.append(f"    VTS response: {upload['responseBody'][:200]}")
-        for row in (imp.get("verification") or {}).get("rows") or []:
-            messages.append(
-                f"    {row.get('column')}: expected {row.get('expected')}, "
-                f"actual {row.get('actual')}"
-            )
         return entry
 
     entry["success"] = True
     entry["message"] = (
-        f"Trigger 1+6 complete — VTS 1 imported {rem_count} P_BAN/P_SUBSCRIBER pairs; "
-        f"VTS 2 imported {row_count} history rows from last {need_total} BANs "
-        f"({batch_count}x{batch_size} Oracle batches)."
+        f"Trigger 1+6 complete — VTS 1: {rem_count} pairs; "
+        f"VTS 2: {row_count} history rows from 3×{batch_size} Oracle queries."
     )
     messages.append(f"  {entry['message']}")
     return entry

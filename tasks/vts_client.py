@@ -392,14 +392,18 @@ def _run_import_upload(
     columns: list[str],
     *,
     colname: str | None = None,
+    max_strategies: int | None = None,
 ) -> dict[str, Any]:
-    """Try every POST shape to /data/import_csv until VTS column counts match."""
+    """Try POST shapes to /data/import_csv until VTS column counts match."""
     url = import_csv_url(base_url, colname)
     col_values = read_columns_from_bytes(content, columns)
     expected = {col: len(col_values[col]) for col in columns}
     attempts: list[dict[str, Any]] = []
+    strategies = _upload_attempts(url, content, filename)
+    if max_strategies is not None:
+        strategies = strategies[: max(1, int(max_strategies))]
 
-    for label, post_fn in _upload_attempts(url, content, filename):
+    for label, post_fn in strategies:
         try:
             response = post_fn()
         except requests.RequestException as exc:
@@ -472,22 +476,35 @@ def import_csv_bytes(
     columns: list[str],
     *,
     colname: str | None = None,
+    quick: bool = False,
 ) -> dict[str, Any]:
     """
     Import a single CSV/TXT file into VTS (P_BAN,P_SUBSCRIBER header + rows).
     POST /data/import_csv then verify counts on get_page.
+    quick=True → only the primary fileToUpload strategy (faster for large history files).
     """
     col_values = read_columns_from_bytes(content, columns)
     expected = {col: len(col_values[col]) for col in columns}
     if max(expected.values(), default=0) == 0:
         raise RuntimeError(f"No data rows found in upload ({filename})")
 
+    max_strategies = 2 if quick else None
     result = _run_import_upload(
-        base_url, content, filename, columns, colname=colname
+        base_url,
+        content,
+        filename,
+        columns,
+        colname=colname,
+        max_strategies=max_strategies,
     )
     if not result.get("verified") and colname is None and len(columns) == 1:
         result = _run_import_upload(
-            base_url, content, filename, columns, colname=columns[0]
+            base_url,
+            content,
+            filename,
+            columns,
+            colname=columns[0],
+            max_strategies=max_strategies,
         )
 
     verified = bool(result.get("verified"))
@@ -512,19 +529,6 @@ def import_csv_bytes(
             )
         ),
     }
-
-
-def import_csv_file(
-    base_url: str,
-    file_path: Path | str,
-    columns: list[str],
-) -> dict[str, Any]:
-    """Import one export file from disk (Oracle remediation TXT)."""
-    path = Path(file_path)
-    if not path.is_file():
-        raise RuntimeError(f"Import file not found: {path}")
-    content = _normalize_csv_bytes(path)
-    return import_csv_bytes(base_url, content, path.name, columns, colname=None)
 
 
 def read_columns_from_bytes(content: bytes, columns: list[str]) -> dict[str, list[str]]:
@@ -626,11 +630,31 @@ def import_oracle_rows(
     rows: list[tuple[Any, ...]],
     *,
     filename: str = "import.csv",
+    quick: bool = False,
 ) -> dict[str, Any]:
     """Import Oracle query rows directly into VTS without writing a persistent file."""
     str_rows = [tuple(str(c or "").strip() for c in row) for row in rows]
     content = build_csv_bytes(headers, str_rows)
-    return import_csv_bytes(base_url, content, filename, headers, colname=None)
+    return import_csv_bytes(
+        base_url, content, filename, headers, colname=None, quick=quick
+    )
+
+
+def import_csv_file(
+    base_url: str,
+    file_path: Path | str,
+    columns: list[str],
+    *,
+    quick: bool = False,
+) -> dict[str, Any]:
+    """Import one export file from disk (Oracle remediation TXT)."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise RuntimeError(f"Import file not found: {path}")
+    content = _normalize_csv_bytes(path)
+    return import_csv_bytes(
+        base_url, content, path.name, columns, colname=None, quick=quick
+    )
 
 
 def verify_column_counts(
