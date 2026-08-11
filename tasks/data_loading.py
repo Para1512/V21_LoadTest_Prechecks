@@ -305,7 +305,8 @@ def _remediate_p_ban_c_vts2(
     """
     Validation 4 (VTS 2 — P_BAN_C & current columns):
     Trigger: P_BAN_C < 1000 OR current column counts not aligned with P_BAN_C.
-    Clear 8 columns → Oracle query → combined TXT → VTS2 import (fileToUpload).
+    Clear 8 columns → Oracle query → drop rows with != 8 fields →
+    combined TXT → VTS2 import (fileToUpload).
     """
     meta = oq.QUERY_META["p_ban_c_vts2"]
     columns = list(meta["clearColumns"])
@@ -332,18 +333,34 @@ def _remediate_p_ban_c_vts2(
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
-    headers, vts_rows = oq.rows_for_vts_import("p_ban_c_vts2", rows)
+    # Drop any row with more (or fewer) than 8 CSV fields before import.
+    kept_rows, kept_count, skipped_count = oq.filter_p_ban_c_import_rows(rows)
+    if skipped_count:
+        messages.append(
+            f"  Skipped {skipped_count} row(s) with more/fewer than 8 fields "
+            f"(not written to import file)."
+        )
+    messages.append(f"  Rows kept for import: {kept_count}.")
+    if not kept_rows:
+        entry["message"] = (
+            "No valid 8-field rows left after filtering oversized/undersized SQL rows."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    headers, vts_rows = oq.rows_for_vts_import("p_ban_c_vts2", kept_rows)
     if not vts_rows:
         entry["message"] = "Could not parse query rows into 8 VTS columns."
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
     txt_path = out_dir / meta["txtFile"]
-    row_count = oq.write_remediation_txt(txt_path, "p_ban_c_vts2", rows, _cols)
+    row_count = oq.write_remediation_txt(txt_path, "p_ban_c_vts2", kept_rows, _cols)
     if row_count != len(vts_rows):
         row_count = len(vts_rows)
     entry["txtFile"] = str(txt_path.relative_to(proj))
     entry["rowCount"] = row_count
+    entry["skippedOversizedRows"] = skipped_count
     messages.append(
         f"  Wrote {meta['txtFile']} ({row_count} data rows + header "
         f"{','.join(headers)})."

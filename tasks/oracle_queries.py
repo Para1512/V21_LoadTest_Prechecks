@@ -406,23 +406,48 @@ def parse_p_ban_h_query_row(row: tuple[Any, ...]) -> tuple[str, ...] | None:
 
 def parse_p_ban_c_query_row(row: tuple[Any, ...]) -> tuple[str, ...] | None:
     """
-    Parse Oracle row into 8 VTS2 current columns.
+    Parse Oracle row into exactly 8 VTS2 current columns.
     Query returns one concatenated CSV row (ban,npa,subscriber,2x unit_esn,2x esn_seq,imsi).
+
+    Rows with more (or fewer) than 8 entries are rejected entirely so they are
+    not truncated into the import file.
     """
+    expected = len(P_BAN_C_VTS2_COLUMNS)
     raw: tuple[str, ...] | None = None
-    if len(row) >= len(P_BAN_C_VTS2_COLUMNS):
-        raw = tuple(str(row[i] or "").strip() for i in range(len(P_BAN_C_VTS2_COLUMNS)))
+    if len(row) == expected:
+        raw = tuple(str(row[i] or "").strip() for i in range(expected))
+    elif len(row) > expected:
+        return None
     elif len(row) >= 1:
         cell = str(row[0] or "").strip()
         parts = [p.strip() for p in cell.split(",")]
-        if len(parts) >= len(P_BAN_C_VTS2_COLUMNS):
-            raw = tuple(parts[: len(P_BAN_C_VTS2_COLUMNS)])
+        if len(parts) != expected:
+            # More than 8 (LISTAGG overflow) or fewer than 8 — drop whole row.
+            return None
+        raw = tuple(parts)
     if raw is None:
         return None
     return tuple(
         _normalize_p_ban_c_field(col, val)
         for col, val in zip(P_BAN_C_VTS2_COLUMNS, raw)
     )
+
+
+def filter_p_ban_c_import_rows(
+    rows: list[tuple[Any, ...]],
+) -> tuple[list[tuple[Any, ...]], int, int]:
+    """
+    Keep only Oracle rows that parse to exactly 8 VTS columns.
+    Returns (kept_oracle_rows, kept_count, skipped_count).
+    """
+    kept: list[tuple[Any, ...]] = []
+    skipped = 0
+    for row in rows:
+        if parse_p_ban_c_query_row(row) is None:
+            skipped += 1
+            continue
+        kept.append(row)
+    return kept, len(kept), skipped
 
 
 def rows_for_vts_import(
