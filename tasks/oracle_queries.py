@@ -181,7 +181,7 @@ QUERY_META: dict[str, dict[str, Any]] = {
     },
     "p_ban_h_vts2": {
         "id": "p_ban_h_vts2",
-        "label": "VTS 2 — P_BAN_H & history columns (Validation 6)",
+        "label": "Trigger 1+6 — P_BAN/P_SUBSCRIBER + P_BAN_H history",
         "clearColumns": P_BAN_H_VTS2_COLUMNS,
         "txtFile": "P_BAN_H_VTS2.txt",
         "headers": P_BAN_H_VTS2_COLUMNS,
@@ -190,7 +190,8 @@ QUERY_META: dict[str, dict[str, Any]] = {
         "totalRows": P_BAN_H_VTS2_TOTAL,
         "batches": P_BAN_H_VTS2_BATCHES,
         "sourceColumns": ["P_BAN", "P_SUBSCRIBER"],
-        "sourceVts": "VTS 1",
+        "sourceVts": "Oracle P_BAN query",
+        "pairedIssue": "ban_subscriber",
     },
 }
 

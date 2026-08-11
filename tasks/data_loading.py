@@ -44,39 +44,46 @@ def remediation_issues(
     precheck: dict[str, Any] | None = None,
     prep: dict[str, Any] | None = None,
 ) -> list[str]:
+    """
+    Detect remediation keys. Trigger 1 (P_BAN/P_SUBSCRIBER) and Trigger 6
+    (P_BAN_H / history) share one combined remediation: p_ban_h_vts2.
+    """
     issues: list[str] = []
+    ban_or_history = False
     if precheck:
         vts1_failed = precheck.get("vts1", {}).get("failedColumns") or []
         vts2_failed = precheck.get("vts2", {}).get("failedColumns") or []
         if "P_BAN" in vts1_failed or "P_SUBSCRIBER" in vts1_failed:
-            issues.append("ban_subscriber")
+            ban_or_history = True
+        if "P_BAN_H" in vts2_failed:
+            ban_or_history = True
         if "P_SIM" in vts1_failed or "P_SIM" in vts2_failed:
             issues.append("p_sim")
         if "P_IMEI_IP14128PUR" in vts1_failed:
             issues.append("p_imei_ip14128pur")
         if "P_BAN_C" in vts2_failed:
             issues.append("p_ban_c_vts2")
-        if "P_BAN_H" in vts2_failed:
-            issues.append("p_ban_h_vts2")
         if "P_NEW_IMEI" in vts2_failed:
             issues.append("p_new_imei_vts2")
     if prep:
         for v in prep.get("validationDetails") or []:
             if not v.get("passed"):
-                if v.get("id") == "vts1-ban-subscriber" and "ban_subscriber" not in issues:
-                    issues.append("ban_subscriber")
+                if v.get("id") in (
+                    "vts1-ban-subscriber",
+                    "vts2-history",
+                    "vts2-p_ban_h",
+                ):
+                    ban_or_history = True
                 elif v.get("id") in ("vts1-p_sim", "vts2-p_sim") and "p_sim" not in issues:
                     issues.append("p_sim")
                 elif v.get("id") == "vts1-p_imei_ip14128pur" and "p_imei_ip14128pur" not in issues:
                     issues.append("p_imei_ip14128pur")
                 elif v.get("id") == "vts2-current" and "p_ban_c_vts2" not in issues:
                     issues.append("p_ban_c_vts2")
-                elif v.get("id") == "vts2-history" and "p_ban_h_vts2" not in issues:
-                    issues.append("p_ban_h_vts2")
-                elif v.get("id") == "vts2-p_ban_h" and "p_ban_h_vts2" not in issues:
-                    issues.append("p_ban_h_vts2")
                 elif v.get("id") == "vts2-p_new_imei" and "p_new_imei_vts2" not in issues:
                     issues.append("p_new_imei_vts2")
+    if ban_or_history:
+        issues.append("p_ban_h_vts2")
     return issues
 
 
@@ -474,93 +481,161 @@ def _remediate_p_new_imei_vts2(
 
 
 def _remediate_p_ban_h_vts2(
-    sql_template: str,
+    history_sql_template: str,
+    ban_sql: str,
     out_dir: Path,
     proj: Path,
     messages: list[str],
 ) -> dict[str, Any]:
     """
-    Validation 6 (VTS 2 — P_BAN_H & history columns):
-    Trigger: P_BAN_H < 2000 OR history column counts not aligned.
-    Clear 7 VTS2 history columns → export P_BAN,P_SUBSCRIBER from VTS1 →
-    take last 3000 → Oracle 3x1000 BAN batches → history TXT → VTS2 import →
-    clear VTS1 P_BAN & P_SUBSCRIBER → re-import remaining pairs.
+    Combined Trigger 1 + Validation 6 (P_BAN / P_SUBSCRIBER + P_BAN_H history):
+    Trigger: P_BAN/P_SUBSCRIBER fail OR P_BAN_H / history fail.
+    1) Clear VTS1 P_BAN,P_SUBSCRIBER and all VTS2 history columns
+    2) Run P_BAN Oracle query
+    3) Reserve last 3000 pairs for history; import remaining to VTS1
+    4) Use 1st column (BAN) of reserved 3000 in 3x1000 history Oracle batches
+    5) Write combined history TXT → import VTS2
     """
     meta = oq.QUERY_META["p_ban_h_vts2"]
-    columns = list(meta["clearColumns"])
+    history_columns = list(meta["clearColumns"])
+    source_headers = ["P_BAN", "P_SUBSCRIBER"]
     need_total = oq.P_BAN_H_VTS2_TOTAL
     batch_size = oq.P_BAN_H_VTS2_BATCH_SIZE
-    source_headers = ["P_BAN", "P_SUBSCRIBER"]
     entry: dict[str, Any] = {
         "issue": "p_ban_h_vts2",
-        "label": meta["label"],
+        "label": "VTS 1 P_BAN/P_SUBSCRIBER + VTS 2 history (Trigger 1+6)",
         "success": False,
         "clearDetails": [],
         "txtFile": None,
         "rowCount": 0,
         "import": None,
         "batches": [],
-        "vts1Reload": None,
+        "vts1Import": None,
     }
 
-    for col in columns:
+    # Clear VTS1 BAN columns and VTS2 history columns before reload.
+    for col in source_headers:
+        vts.clear_column(VTS1_URL, col)
+        entry["clearDetails"].append({"vts": "VTS 1", "column": col, "success": True})
+        messages.append(f"  Cleared VTS 1 — {col}: Passed")
+    for col in history_columns:
         vts.clear_column(VTS2_URL, col)
         entry["clearDetails"].append({"vts": "VTS 2", "column": col, "success": True})
         messages.append(f"  Cleared VTS 2 — {col}: Passed")
 
-    messages.append("  Exporting P_BAN,P_SUBSCRIBER from VTS 1 …")
-    paired = vts.fetch_column_pairs(VTS1_URL, source_headers)
-    messages.append(f"  VTS 1 P_BAN/P_SUBSCRIBER pairs: {len(paired)}.")
+    if not ban_sql.strip():
+        entry["message"] = "P_BAN / P_SUBSCRIBER SQL query is empty."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    messages.append("  Running Oracle P_BAN / P_SUBSCRIBER query …")
+    ban_rows, _ban_cols = oq.run_sql(ban_sql)
+    messages.append(f"  P_BAN query returned {len(ban_rows)} row(s).")
+    if not ban_rows:
+        entry["message"] = "Oracle P_BAN query returned no rows."
+        messages.append(f"  FAILED — {entry['message']}")
+        return entry
+
+    _, paired = oq.rows_for_vts_import("ban_subscriber", ban_rows)
+    messages.append(f"  Parsed P_BAN/P_SUBSCRIBER pairs: {len(paired)}.")
     if len(paired) < need_total:
         entry["message"] = (
-            f"VTS 1 has {len(paired)} P_BAN/P_SUBSCRIBER pairs; "
-            f"need at least {need_total}."
+            f"P_BAN query produced {len(paired)} pairs; need at least {need_total} "
+            f"to reserve last {need_total} for P_BAN_H."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
-    consumed = paired[-need_total:]
+    reserved = paired[-need_total:]
     remaining = paired[:-need_total]
-    consumed_bans = [str(row[0]).strip() for row in consumed if str(row[0] or "").strip()]
+    reserved_bans = [str(row[0]).strip() for row in reserved if str(row[0] or "").strip()]
     messages.append(
-        f"  Using last {need_total} pairs for Oracle "
+        f"  Reserved last {need_total} pairs for P_BAN_H "
         f"({batch_size} BANs x {oq.P_BAN_H_VTS2_BATCHES} batches); "
-        f"keeping {len(remaining)} pairs for VTS 1 reload "
-        "(export header row skipped)."
+        f"importing {len(remaining)} remaining pairs to VTS 1 P_BAN/P_SUBSCRIBER."
     )
-    if len(consumed_bans) < batch_size:
+
+    # Import remaining (everything except last 3000) to VTS1.
+    remaining_path = out_dir / "P_BAN_P_SUBSCRIBER.txt"
+    rem_lines = [",".join(source_headers)]
+    for ban, sub in remaining:
+        rem_lines.append(f"{ban},{sub}")
+    remaining_path.write_bytes(("\r\n".join(rem_lines) + "\r\n").encode("utf-8"))
+    rem_count = len(remaining)
+    messages.append(
+        f"  Wrote {remaining_path.name} ({rem_count} data rows + header "
+        f"{','.join(source_headers)})."
+    )
+
+    if remaining:
+        vts1_imp = _import_vts_data(
+            VTS1_URL,
+            "VTS 1",
+            source_headers,
+            remaining,
+            remaining_path,
+            remaining_path.name,
+            messages,
+        )
+    else:
+        verify = vts.verify_column_counts(
+            VTS1_URL, {col: 0 for col in source_headers}
+        )
+        vts1_imp = {
+            "verified": bool(verify.get("verified")),
+            "message": "VTS 1 left empty (all pairs reserved for P_BAN_H).",
+            "verification": verify,
+        }
+        messages.append(f"  {vts1_imp['message']}")
+
+    entry["vts1Import"] = {
+        "txtFile": str(remaining_path.relative_to(proj)),
+        "rowCount": rem_count,
+        "import": vts1_imp,
+    }
+    if not vts1_imp.get("verified"):
         entry["message"] = (
-            f"Only {len(consumed_bans)} P_BAN values available; "
-            f"need at least {batch_size} per Oracle batch."
+            vts1_imp.get("message")
+            or "VTS 1 P_BAN/P_SUBSCRIBER import failed."
+        )
+        messages.append(f"  FAILED — {entry['message']}")
+        for row in (vts1_imp.get("verification") or {}).get("rows") or []:
+            messages.append(
+                f"    {row.get('column')}: expected {row.get('expected')}, "
+                f"actual {row.get('actual')}"
+            )
+        return entry
+
+    if len(reserved_bans) < need_total:
+        entry["message"] = (
+            f"Only {len(reserved_bans)} BAN values in reserved block; "
+            f"need {need_total}."
         )
         messages.append(f"  FAILED — {entry['message']}")
         return entry
 
+    # History query: first column only, 3 batches of 1000.
     all_rows: list[tuple[Any, ...]] = []
-    batch_count = min(
-        oq.P_BAN_H_VTS2_BATCHES,
-        len(consumed_bans) // batch_size,
-    )
-    if batch_count < 1:
-        entry["message"] = (
-            f"Need at least {batch_size} BANs for one Oracle batch; "
-            f"got {len(consumed_bans)}."
-        )
-        messages.append(f"  FAILED — {entry['message']}")
-        return entry
-
+    batch_count = oq.P_BAN_H_VTS2_BATCHES
     for batch_no in range(1, batch_count + 1):
         start = (batch_no - 1) * batch_size
-        batch_bans = consumed_bans[start : start + batch_size]
+        batch_bans = reserved_bans[start : start + batch_size]
+        if len(batch_bans) < batch_size:
+            entry["message"] = (
+                f"Batch {batch_no} has only {len(batch_bans)} BANs; "
+                f"need {batch_size}."
+            )
+            messages.append(f"  FAILED — {entry['message']}")
+            return entry
         try:
-            batch_sql = oq.build_p_ban_h_sql(sql_template, batch_bans)
+            batch_sql = oq.build_p_ban_h_sql(history_sql_template, batch_bans)
         except ValueError as exc:
             entry["message"] = str(exc)
             messages.append(f"  FAILED — {exc}")
             return entry
         messages.append(
-            f"  Oracle batch {batch_no}/{batch_count} "
-            f"({len(batch_bans)} BANs) …"
+            f"  Oracle history batch {batch_no}/{batch_count} "
+            f"(BANs {start + 1}-{start + len(batch_bans)}) …"
         )
         try:
             rows, _cols = oq.run_sql(batch_sql)
@@ -571,8 +646,8 @@ def _remediate_p_ban_h_vts2(
             if "ORA-01722" in err or "invalid number" in err.lower():
                 sample = ", ".join(batch_bans[:8])
                 messages.append(
-                    "  Hint: confirm export header was skipped and BANs look numeric. "
-                    f"Sample BANs in this batch: {sample}"
+                    "  Hint: BANs must be numeric text for TO_CHAR(a.customer_id) IN (...). "
+                    f"Sample BANs: {sample}"
                 )
                 messages.append(
                     "  Ensure Oracle Queries for Validation 6 uses: "
@@ -630,65 +705,11 @@ def _remediate_p_ban_h_vts2(
             )
         return entry
 
-    messages.append(
-        f"  Clearing VTS 1 P_BAN & P_SUBSCRIBER, then re-importing "
-        f"{len(remaining)} remaining pairs (consumed last {need_total}) …"
-    )
-    remaining_path = out_dir / "P_BAN_P_SUBSCRIBER_remaining.txt"
-    rem_lines = [",".join(source_headers)]
-    for ban, sub in remaining:
-        rem_lines.append(f"{ban},{sub}")
-    remaining_path.write_bytes(("\r\n".join(rem_lines) + "\r\n").encode("utf-8"))
-
-    for col in source_headers:
-        vts.clear_column(VTS1_URL, col)
-        entry["clearDetails"].append({"vts": "VTS 1", "column": col, "success": True})
-        messages.append(f"  Cleared VTS 1 — {col}: Passed")
-
-    if remaining:
-        reload = _import_vts_data(
-            VTS1_URL,
-            "VTS 1",
-            source_headers,
-            remaining,
-            remaining_path,
-            remaining_path.name,
-            messages,
-        )
-    else:
-        verify = vts.verify_column_counts(
-            VTS1_URL, {col: 0 for col in source_headers}
-        )
-        reload = {
-            "verified": bool(verify.get("verified")),
-            "message": "VTS 1 P_BAN/P_SUBSCRIBER cleared (no remaining pairs).",
-            "verification": verify,
-        }
-        messages.append(f"  {reload['message']}")
-
-    entry["vts1Reload"] = {
-        "txtFile": str(remaining_path.relative_to(proj)),
-        "rowCount": len(remaining),
-        "import": reload,
-    }
-    if not reload.get("verified"):
-        entry["message"] = (
-            reload.get("message")
-            or "VTS2 import succeeded but VTS1 P_BAN/P_SUBSCRIBER reload failed."
-        )
-        messages.append(f"  FAILED — {entry['message']}")
-        for row in (reload.get("verification") or {}).get("rows") or []:
-            messages.append(
-                f"    {row.get('column')}: expected {row.get('expected')}, "
-                f"actual {row.get('actual')}"
-            )
-        return entry
-
     entry["success"] = True
     entry["message"] = (
-        f"Validation 6 complete — imported {row_count} history rows into VTS 2; "
-        f"VTS 1 P_BAN/P_SUBSCRIBER reloaded with {len(remaining)} remaining pairs "
-        f"(removed last {need_total})."
+        f"Trigger 1+6 complete — VTS 1 imported {rem_count} P_BAN/P_SUBSCRIBER pairs; "
+        f"VTS 2 imported {row_count} history rows from last {need_total} BANs "
+        f"({batch_count}x{batch_size} Oracle batches)."
     )
     messages.append(f"  {entry['message']}")
     return entry
@@ -834,20 +855,36 @@ def run_vts1_remediation(
             continue
 
         if issue_key == "p_ban_h_vts2":
-            messages.append(f"--- {meta['label']} ---")
+            messages.append(
+                "--- VTS 1 P_BAN/P_SUBSCRIBER + VTS 2 history (Trigger 1+6) ---"
+            )
+            ban_sql = queries.get("ban_subscriber", "").strip()
             if not sql:
                 results.append(
                     {
                         "issue": issue_key,
                         "label": meta["label"],
                         "success": False,
-                        "message": "SQL query is empty.",
+                        "message": "History SQL query is empty.",
                     }
                 )
-                messages.append("  FAILED — SQL query is empty.")
+                messages.append("  FAILED — History SQL query is empty.")
+                continue
+            if not ban_sql:
+                results.append(
+                    {
+                        "issue": issue_key,
+                        "label": meta["label"],
+                        "success": False,
+                        "message": "P_BAN / P_SUBSCRIBER SQL query is empty.",
+                    }
+                )
+                messages.append("  FAILED — P_BAN / P_SUBSCRIBER SQL query is empty.")
                 continue
             try:
-                entry = _remediate_p_ban_h_vts2(sql, out_dir, proj, messages)
+                entry = _remediate_p_ban_h_vts2(
+                    sql, ban_sql, out_dir, proj, messages
+                )
             except Exception as exc:
                 entry = {
                     "issue": issue_key,
