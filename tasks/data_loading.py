@@ -406,7 +406,7 @@ def _remediate_p_new_imei_vts2(
 ) -> dict[str, Any]:
     """
     Validation 5 (VTS 2 — P_NEW_IMEI):
-    Trigger: P_NEW_IMEI count < 1500.
+    Trigger: P_NEW_IMEI count < 3000 (no P_BAN_H comparison).
     Clear column → Oracle query (up to 4k IMEI rows) → TXT with header → VTS2 import.
     """
     meta = oq.QUERY_META["p_new_imei_vts2"]
@@ -1228,22 +1228,6 @@ def run_vts_prep() -> dict[str, Any]:
     validation_details.append(vts2_p_ban_h)
     messages.append(vts2_p_ban_h["message"])
 
-    p_new_check = vts.check_p_new_imei_gte_ban_h(vts2_counts)
-    p_new_entry = {
-        "id": "vts2-new-imei",
-        "name": "VTS 2 — P_NEW_IMEI vs P_BAN_H",
-        "passed": bool(p_new_check.get("passed")),
-        "rule": "P_NEW_IMEI count must be >= P_BAN_H count",
-        "rows": [
-            {"column": "P_BAN_H", "count": p_new_check.get("pBanH")},
-            {"column": "P_NEW_IMEI", "count": p_new_check.get("pNewImei")},
-        ],
-        "required": p_new_check.get("required"),
-        "message": p_new_check.get("message", ""),
-    }
-    validation_details.append(p_new_entry)
-    messages.append(p_new_entry["message"])
-
     all_passed = all(v["passed"] for v in validation_details)
 
     def _prep_fail(message: str) -> dict[str, Any]:
@@ -1279,8 +1263,6 @@ def run_vts_prep() -> dict[str, Any]:
         if not v2h_entry["passed"]:
             detail.append("history columns")
         return _prep_fail(f"VTS 2 data is not aligned ({' and '.join(detail)}).")
-    if not p_new_entry["passed"]:
-        return _prep_fail(p_new_entry["message"])
 
     messages.append("=== Removing old test data ===")
     clear_details: list[dict[str, Any]] = []

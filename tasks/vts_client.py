@@ -28,7 +28,7 @@ VTS2_MIN_COUNTS: dict[str, int] = {
     "P_BAN_C": 1000,
     "P_BAN_H": 2000,
     "P_SIM": 5000,
-    "P_NEW_IMEI": 1500,
+    "P_NEW_IMEI": 3000,
 }
 
 VTS1_ALIGN_COLUMNS = ("P_BAN", "P_SUBSCRIBER")
@@ -1113,47 +1113,6 @@ def counts_snapshot(
     counts_per_column: dict[str, Any], columns: tuple[str, ...] | list[str]
 ) -> dict[str, int | None]:
     return {col: column_count(counts_per_column, col) for col in columns}
-
-
-def check_p_new_imei_gte_ban_h(
-    counts_per_column: dict[str, Any],
-    *,
-    label: str = "VTS 2 (P_NEW_IMEI vs P_BAN_H)",
-) -> dict[str, Any]:
-    p_ban_h = column_count(counts_per_column, "P_BAN_H")
-    p_new_imei = column_count(counts_per_column, "P_NEW_IMEI")
-    if p_ban_h is None:
-        return {
-            "passed": False,
-            "label": label,
-            "pBanH": p_ban_h,
-            "pNewImei": p_new_imei,
-            "message": f"{label}: P_BAN_H count is missing from countsPerColumn.",
-        }
-    if p_new_imei is None:
-        return {
-            "passed": False,
-            "label": label,
-            "pBanH": p_ban_h,
-            "pNewImei": p_new_imei,
-            "message": f"{label}: P_NEW_IMEI count is missing from countsPerColumn.",
-        }
-    passed = p_new_imei >= p_ban_h
-    if passed:
-        message = f"{label}: P_NEW_IMEI ({p_new_imei}) >= P_BAN_H ({p_ban_h})."
-    else:
-        message = (
-            f"{label}: P_NEW_IMEI ({p_new_imei}) is less than P_BAN_H ({p_ban_h}); "
-            "expected P_NEW_IMEI >= P_BAN_H."
-        )
-    return {
-        "passed": passed,
-        "label": label,
-        "pBanH": p_ban_h,
-        "pNewImei": p_new_imei,
-        "required": f"P_NEW_IMEI >= P_BAN_H ({p_ban_h})",
-        "message": message,
-    }
 
 
 def check_min_counts(
