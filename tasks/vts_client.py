@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from io import BytesIO
@@ -18,18 +19,148 @@ VTS_JOB_POLL_TIMEOUT_S = 15.0
 VTS_COUNT_VERIFY_TIMEOUT_S = 20.0
 VTS_COUNT_VERIFY_INTERVAL_S = 0.5
 
-VTS1_MIN_COUNTS: dict[str, int] = {
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MIN_COUNTS_PATH = PROJECT_ROOT / "config" / "vts_min_counts.json"
+
+DEFAULT_VTS1_MIN_COUNTS: dict[str, int] = {
     "P_BAN": 8000,
     "P_SIM": 8000,
     "P_IMEI_IP14128PUR": 8000,
 }
 
-VTS2_MIN_COUNTS: dict[str, int] = {
+DEFAULT_VTS2_MIN_COUNTS: dict[str, int] = {
     "P_BAN_C": 1000,
     "P_BAN_H": 2000,
     "P_SIM": 5000,
     "P_NEW_IMEI": 3000,
 }
+
+# Active limits (defaults + optional saved overrides). Prefer get_vts*_min_counts().
+VTS1_MIN_COUNTS: dict[str, int] = dict(DEFAULT_VTS1_MIN_COUNTS)
+VTS2_MIN_COUNTS: dict[str, int] = dict(DEFAULT_VTS2_MIN_COUNTS)
+
+
+def _sanitize_count(value: Any, fallback: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, n)
+
+
+def _read_saved_min_counts() -> dict[str, Any]:
+    if not MIN_COUNTS_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(MIN_COUNTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def reload_min_counts() -> tuple[dict[str, int], dict[str, int]]:
+    """Load saved limits into module-level VTS1/VTS2_MIN_COUNTS and return them."""
+    saved = _read_saved_min_counts()
+    vts1_saved = saved.get("vts1") if isinstance(saved.get("vts1"), dict) else {}
+    vts2_saved = saved.get("vts2") if isinstance(saved.get("vts2"), dict) else {}
+
+    vts1 = {
+        col: _sanitize_count(vts1_saved.get(col, default), default)
+        for col, default in DEFAULT_VTS1_MIN_COUNTS.items()
+    }
+    vts2 = {
+        col: _sanitize_count(vts2_saved.get(col, default), default)
+        for col, default in DEFAULT_VTS2_MIN_COUNTS.items()
+    }
+    VTS1_MIN_COUNTS.clear()
+    VTS1_MIN_COUNTS.update(vts1)
+    VTS2_MIN_COUNTS.clear()
+    VTS2_MIN_COUNTS.update(vts2)
+    return dict(VTS1_MIN_COUNTS), dict(VTS2_MIN_COUNTS)
+
+
+def get_vts1_min_counts() -> dict[str, int]:
+    reload_min_counts()
+    return dict(VTS1_MIN_COUNTS)
+
+
+def get_vts2_min_counts() -> dict[str, int]:
+    reload_min_counts()
+    return dict(VTS2_MIN_COUNTS)
+
+
+def save_min_counts(
+    vts1: dict[str, Any] | None = None,
+    vts2: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Persist VTS min-count overrides.
+    Pass partial dicts; missing keys keep current/default values.
+    """
+    current1, current2 = reload_min_counts()
+    next1 = dict(current1)
+    next2 = dict(current2)
+    if isinstance(vts1, dict):
+        for col in DEFAULT_VTS1_MIN_COUNTS:
+            if col in vts1:
+                next1[col] = _sanitize_count(vts1[col], DEFAULT_VTS1_MIN_COUNTS[col])
+    if isinstance(vts2, dict):
+        for col in DEFAULT_VTS2_MIN_COUNTS:
+            if col in vts2:
+                next2[col] = _sanitize_count(vts2[col], DEFAULT_VTS2_MIN_COUNTS[col])
+
+    payload = {"vts1": next1, "vts2": next2}
+    MIN_COUNTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MIN_COUNTS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    reload_min_counts()
+    return min_counts_for_api()
+
+
+def reset_min_counts() -> dict[str, Any]:
+    """Remove saved overrides and restore defaults."""
+    if MIN_COUNTS_PATH.is_file():
+        try:
+            MIN_COUNTS_PATH.unlink()
+        except OSError:
+            pass
+    reload_min_counts()
+    return min_counts_for_api()
+
+
+def min_counts_for_api() -> dict[str, Any]:
+    vts1, vts2 = reload_min_counts()
+    return {
+        "success": True,
+        "vts1": vts1,
+        "vts2": vts2,
+        "defaults": {
+            "vts1": dict(DEFAULT_VTS1_MIN_COUNTS),
+            "vts2": dict(DEFAULT_VTS2_MIN_COUNTS),
+        },
+        "fields": [
+            {"vts": "VTS 1", "key": "vts1", "column": "P_BAN", "label": "VTS 1 — P_BAN"},
+            {"vts": "VTS 1", "key": "vts1", "column": "P_SIM", "label": "VTS 1 — P_SIM"},
+            {
+                "vts": "VTS 1",
+                "key": "vts1",
+                "column": "P_IMEI_IP14128PUR",
+                "label": "VTS 1 — P_IMEI_IP14128PUR",
+            },
+            {"vts": "VTS 2", "key": "vts2", "column": "P_BAN_C", "label": "VTS 2 — P_BAN_C"},
+            {"vts": "VTS 2", "key": "vts2", "column": "P_BAN_H", "label": "VTS 2 — P_BAN_H"},
+            {"vts": "VTS 2", "key": "vts2", "column": "P_SIM", "label": "VTS 2 — P_SIM"},
+            {
+                "vts": "VTS 2",
+                "key": "vts2",
+                "column": "P_NEW_IMEI",
+                "label": "VTS 2 — P_NEW_IMEI",
+            },
+        ],
+    }
+
+
+# Load persisted limits at import time.
+reload_min_counts()
 
 VTS1_ALIGN_COLUMNS = ("P_BAN", "P_SUBSCRIBER")
 

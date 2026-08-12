@@ -193,6 +193,12 @@ function renderTasks() {
       qBtn.disabled = task.status === "Running";
       qBtn.addEventListener("click", () => void openOracleQueriesEditor());
       actions.appendChild(qBtn);
+      const limBtn = document.createElement("button");
+      limBtn.type = "button";
+      limBtn.textContent = "VTS Limits";
+      limBtn.disabled = task.status === "Running";
+      limBtn.addEventListener("click", () => void openVtsLimitsEditor());
+      actions.appendChild(limBtn);
     }
     card.appendChild(actions);
 
@@ -1920,6 +1926,172 @@ async function openOracleQueriesEditor() {
     } finally {
       updateBtn.disabled = false;
       cancelBtn.disabled = false;
+    }
+  });
+}
+
+let vtsLimitsModalEl = null;
+
+function closeVtsLimitsEditor() {
+  if (vtsLimitsModalEl) {
+    vtsLimitsModalEl.remove();
+    vtsLimitsModalEl = null;
+  }
+}
+
+async function openVtsLimitsEditor() {
+  closeVtsLimitsEditor();
+  const overlay = document.createElement("div");
+  overlay.className = "oracle-queries-overlay";
+  const panel = document.createElement("div");
+  panel.className = "oracle-queries-panel vts-limits-panel";
+
+  const title = document.createElement("h3");
+  title.textContent = "VTS minimum limits";
+  panel.appendChild(title);
+
+  const hint = document.createElement("p");
+  hint.className = "oracle-queries-hint";
+  hint.textContent =
+    "Update pre-check / validation minimum counts. Saved values are used on the next Task 1 RUN.";
+  panel.appendChild(hint);
+
+  const form = document.createElement("div");
+  form.className = "vts-limits-form";
+  form.textContent = "Loading limits…";
+  panel.appendChild(form);
+
+  const actions = document.createElement("div");
+  actions.className = "oracle-queries-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => closeVtsLimitsEditor());
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "skip";
+  resetBtn.textContent = "Reset defaults";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "primary";
+  saveBtn.textContent = "Save limits";
+  actions.appendChild(cancelBtn);
+  actions.appendChild(resetBtn);
+  actions.appendChild(saveBtn);
+  panel.appendChild(actions);
+
+  overlay.appendChild(panel);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeVtsLimitsEditor();
+  });
+  document.body.appendChild(overlay);
+  vtsLimitsModalEl = overlay;
+
+  let payload;
+  try {
+    const res = await fetch(apiUrl("/api/tasks/data-loading/vts-limits"));
+    payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.message || `HTTP ${res.status}`);
+  } catch (err) {
+    form.textContent = `Failed to load limits: ${formatFetchFailureMessage(err)}`;
+    saveBtn.disabled = true;
+    resetBtn.disabled = true;
+    return;
+  }
+
+  const inputs = {};
+  form.textContent = "";
+  const groups = [
+    { key: "vts1", title: "VTS 1", data: payload.vts1 || {} },
+    { key: "vts2", title: "VTS 2", data: payload.vts2 || {} }
+  ];
+  groups.forEach((group) => {
+    const section = document.createElement("div");
+    section.className = "vts-limits-section";
+    const h = document.createElement("div");
+    h.className = "disk-header";
+    h.textContent = group.title;
+    section.appendChild(h);
+    Object.keys(group.data).forEach((column) => {
+      const row = document.createElement("label");
+      row.className = "vts-limits-row";
+      const name = document.createElement("span");
+      name.textContent = column;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = "0";
+      input.step = "1";
+      input.className = "vts-limits-input";
+      input.value = String(group.data[column]);
+      input.dataset.group = group.key;
+      input.dataset.column = column;
+      inputs[`${group.key}.${column}`] = input;
+      row.appendChild(name);
+      row.appendChild(input);
+      section.appendChild(row);
+    });
+    form.appendChild(section);
+  });
+
+  function collectBody() {
+    const body = { vts1: {}, vts2: {} };
+    Object.values(inputs).forEach((input) => {
+      const group = input.dataset.group;
+      const column = input.dataset.column;
+      const n = Number.parseInt(String(input.value).trim(), 10);
+      body[group][column] = Number.isFinite(n) ? Math.max(0, n) : 0;
+    });
+    return body;
+  }
+
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    resetBtn.disabled = true;
+    cancelBtn.disabled = true;
+    try {
+      const res = await fetch(apiUrl("/api/tasks/data-loading/vts-limits"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectBody())
+      });
+      const saved = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(saved.message || `Save failed (HTTP ${res.status})`);
+      closeVtsLimitsEditor();
+    } catch (err) {
+      hint.textContent = `Save failed: ${formatFetchFailureMessage(err)}`;
+      hint.className = "oracle-queries-hint oracle-queries-error";
+    } finally {
+      saveBtn.disabled = false;
+      resetBtn.disabled = false;
+      cancelBtn.disabled = false;
+    }
+  });
+
+  resetBtn.addEventListener("click", async () => {
+    resetBtn.disabled = true;
+    saveBtn.disabled = true;
+    try {
+      const res = await fetch(apiUrl("/api/tasks/data-loading/vts-limits/reset"), {
+        method: "POST"
+      });
+      const saved = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(saved.message || `Reset failed (HTTP ${res.status})`);
+      const defaultsVts1 = saved.vts1 || payload.defaults?.vts1 || {};
+      const defaultsVts2 = saved.vts2 || payload.defaults?.vts2 || {};
+      Object.values(inputs).forEach((input) => {
+        const group = input.dataset.group;
+        const column = input.dataset.column;
+        const src = group === "vts1" ? defaultsVts1 : defaultsVts2;
+        input.value = String(src[column] ?? 0);
+      });
+      hint.textContent = "Defaults restored and saved. Next Task 1 RUN will use these limits.";
+      hint.className = "oracle-queries-hint";
+    } catch (err) {
+      hint.textContent = `Reset failed: ${formatFetchFailureMessage(err)}`;
+      hint.className = "oracle-queries-hint oracle-queries-error";
+    } finally {
+      resetBtn.disabled = false;
+      saveBtn.disabled = false;
     }
   });
 }

@@ -374,6 +374,36 @@ def task_data_loading_oracle_queries_put():
         return jsonify({"success": False, "message": str(e) or "Failed to save queries."}), 500
 
 
+@app.route("/api/tasks/data-loading/vts-limits", methods=["GET"])
+def task_data_loading_vts_limits_get():
+    from tasks import data_loading as dl
+
+    return jsonify(dl.get_vts_limits())
+
+
+@app.route("/api/tasks/data-loading/vts-limits", methods=["PUT"])
+def task_data_loading_vts_limits_put():
+    from tasks import data_loading as dl
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"success": False, "message": "Expected JSON object with vts1/vts2 limits."}), 400
+    try:
+        return jsonify(dl.save_vts_limits(body))
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e) or "Failed to save VTS limits."}), 500
+
+
+@app.route("/api/tasks/data-loading/vts-limits/reset", methods=["POST"])
+def task_data_loading_vts_limits_reset():
+    from tasks import data_loading as dl
+
+    try:
+        return jsonify(dl.reset_vts_limits())
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e) or "Failed to reset VTS limits."}), 500
+
+
 @app.route("/api/tasks/data-loading/run-flow", methods=["POST"])
 def task_data_loading_run_flow():
     from tasks import data_loading as dl

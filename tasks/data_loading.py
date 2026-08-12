@@ -30,7 +30,28 @@ def query_defaults() -> dict[str, Any]:
         "defaults": p,
         "displaySql": ora.build_main_query_sql(p),
         "oracleQueries": oq.queries_for_api(),
+        "vtsLimits": vts.min_counts_for_api(),
     }
+
+
+def get_vts_limits() -> dict[str, Any]:
+    return vts.min_counts_for_api()
+
+
+def save_vts_limits(body: dict[str, Any]) -> dict[str, Any]:
+    vts1 = body.get("vts1") if isinstance(body.get("vts1"), dict) else None
+    vts2 = body.get("vts2") if isinstance(body.get("vts2"), dict) else None
+    if vts1 is None and vts2 is None:
+        # Allow flat payload: { "vts1": {...} } already handled; also accept nested under limits
+        limits = body.get("limits") if isinstance(body.get("limits"), dict) else None
+        if limits:
+            vts1 = limits.get("vts1") if isinstance(limits.get("vts1"), dict) else None
+            vts2 = limits.get("vts2") if isinstance(limits.get("vts2"), dict) else None
+    return vts.save_min_counts(vts1=vts1, vts2=vts2)
+
+
+def reset_vts_limits() -> dict[str, Any]:
+    return vts.reset_min_counts()
 
 
 def get_oracle_queries() -> dict[str, Any]:
@@ -1278,28 +1299,22 @@ def _min_count_validation_entry(
 def run_vts_precheck() -> dict[str, Any]:
     """Query VTS1/VTS2 get_page APIs and verify minimum column counts."""
     messages: list[str] = []
+    vts1_mins = vts.get_vts1_min_counts()
+    vts2_mins = vts.get_vts2_min_counts()
     messages.append("Checking VTS 1 …")
-    vts1_rules = ", ".join(
-        f"{col} >= {req}" for col, req in vts.VTS1_MIN_COUNTS.items()
-    )
+    vts1_rules = ", ".join(f"{col} >= {req}" for col, req in vts1_mins.items())
     messages.append(f"  VTS 1 pre-check rules: {vts1_rules}")
     vts1_payload = vts.fetch_get_page(VTS1_URL)
     vts1_counts = vts1_payload["countsPerColumn"]
-    vts1_result = vts.check_min_counts(
-        vts1_counts, vts.VTS1_MIN_COUNTS, label="VTS 1"
-    )
+    vts1_result = vts.check_min_counts(vts1_counts, vts1_mins, label="VTS 1")
     messages.extend(vts1_result["messages"])
 
     messages.append("Checking VTS 2 …")
-    vts2_rules = ", ".join(
-        f"{col} >= {req}" for col, req in vts.VTS2_MIN_COUNTS.items()
-    )
+    vts2_rules = ", ".join(f"{col} >= {req}" for col, req in vts2_mins.items())
     messages.append(f"  VTS 2 pre-check rules: {vts2_rules}")
     vts2_payload = vts.fetch_get_page(VTS2_URL)
     vts2_counts = vts2_payload["countsPerColumn"]
-    vts2_result = vts.check_min_counts(
-        vts2_counts, vts.VTS2_MIN_COUNTS, label="VTS 2"
-    )
+    vts2_result = vts.check_min_counts(vts2_counts, vts2_mins, label="VTS 2")
     messages.extend(vts2_result["messages"])
 
     can_proceed = vts1_result["safe"] and vts2_result["safe"]
@@ -1379,7 +1394,10 @@ def run_vts_prep() -> dict[str, Any]:
     validation_details.append(v1_entry)
     messages.append(v1_entry["message"])
 
-    for col, required in (("P_SIM", 8000), ("P_IMEI_IP14128PUR", 8000)):
+    vts1_mins = vts.get_vts1_min_counts()
+    vts2_mins = vts.get_vts2_min_counts()
+    for col in ("P_SIM", "P_IMEI_IP14128PUR"):
+        required = vts1_mins[col]
         min_entry = _min_count_validation_entry(
             vts1_counts,
             col,
@@ -1393,9 +1411,9 @@ def run_vts_prep() -> dict[str, Any]:
     vts2_p_sim = _min_count_validation_entry(
         vts2_counts,
         "P_SIM",
-        vts.VTS2_MIN_COUNTS["P_SIM"],
+        vts2_mins["P_SIM"],
         id="vts2-p_sim",
-        name=f"VTS 2 — P_SIM >= {vts.VTS2_MIN_COUNTS['P_SIM']}",
+        name=f"VTS 2 — P_SIM >= {vts2_mins['P_SIM']}",
     )
     validation_details.append(vts2_p_sim)
     messages.append(vts2_p_sim["message"])
@@ -1403,9 +1421,9 @@ def run_vts_prep() -> dict[str, Any]:
     vts2_p_new_imei = _min_count_validation_entry(
         vts2_counts,
         "P_NEW_IMEI",
-        vts.VTS2_MIN_COUNTS["P_NEW_IMEI"],
+        vts2_mins["P_NEW_IMEI"],
         id="vts2-p_new_imei",
-        name=f"VTS 2 — P_NEW_IMEI >= {vts.VTS2_MIN_COUNTS['P_NEW_IMEI']}",
+        name=f"VTS 2 — P_NEW_IMEI >= {vts2_mins['P_NEW_IMEI']}",
     )
     validation_details.append(vts2_p_new_imei)
     messages.append(vts2_p_new_imei["message"])
@@ -1431,9 +1449,9 @@ def run_vts_prep() -> dict[str, Any]:
     vts2_p_ban_h = _min_count_validation_entry(
         vts2_counts,
         "P_BAN_H",
-        vts.VTS2_MIN_COUNTS["P_BAN_H"],
+        vts2_mins["P_BAN_H"],
         id="vts2-p_ban_h",
-        name=f"VTS 2 — P_BAN_H >= {vts.VTS2_MIN_COUNTS['P_BAN_H']}",
+        name=f"VTS 2 — P_BAN_H >= {vts2_mins['P_BAN_H']}",
     )
     validation_details.append(vts2_p_ban_h)
     messages.append(vts2_p_ban_h["message"])

@@ -1268,6 +1268,51 @@ button:disabled {
   border-top: 1px solid var(--line);
 }
 
+.vts-limits-panel {
+  max-width: min(560px, 96vw);
+}
+
+.vts-limits-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vts-limits-section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px 12px;
+  background: rgba(7, 11, 18, 0.35);
+}
+
+.vts-limits-row {
+  display: grid;
+  grid-template-columns: 1fr 140px;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.vts-limits-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-0);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+.vts-limits-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
+}
+
 @keyframes rise-in {
   from {
     opacity: 0;
