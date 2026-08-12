@@ -21,7 +21,7 @@
             <p class="brand-kicker">Performance Engineering</p>
             <h1>PreChecks Portal</h1>
             <p class="brand-tag">
-              One place to validate data, disks, logs, and servers before V21 load tests.
+              Pipeline for data, email, disk, log, and server readiness before V21 load tests.
             </p>
           </div>
         </div>
@@ -32,28 +32,69 @@
       </header>
 
       <main class="container">
-        <section class="panel panel-email">
-          <div class="panel-head">
-            <div>
-              <h2>Email triggers</h2>
-              <p class="panel-sub">Notify DBA / NPE support for manual prep steps.</p>
-            </div>
+        <section class="pipeline" aria-label="Precheck pipeline">
+          <div class="pipeline-head">
+            <h2>Execution pipeline</h2>
+            <p class="panel-sub">Email prep first, then automation tasks in order.</p>
           </div>
-          <div class="button-row">
-            <button id="btn-hup-email" class="primary">HUP Offer Cleanup — Trigger Email</button>
-            <button id="btn-crm-email" class="primary primary-alt">CRM IGW Bounce — Trigger Email</button>
-          </div>
-          <div id="email-feedback" class="feedback"></div>
-        </section>
 
-        <section class="panel panel-tasks">
-          <div class="panel-head">
-            <div>
-              <h2>Automation tasks</h2>
-              <p class="panel-sub">Run each precheck in order. Expand output for validation details.</p>
-            </div>
+          <ol class="pipeline-track">
+            <li class="pipeline-step pipeline-step-email">
+              <div class="pipeline-spine" aria-hidden="true">
+                <span class="pipeline-node">E1</span>
+                <span class="pipeline-connector"></span>
+              </div>
+              <article class="pipeline-card task-card">
+                <div class="task-header">
+                  <div class="task-title-wrap">
+                    <div class="task-title-row">
+                      <span class="task-index">E1</span>
+                      <div class="task-title">HUP Offer Cleanup</div>
+                    </div>
+                    <div class="task-purpose">Email DBA support to truncate HUP_OFFER on PCUST.</div>
+                  </div>
+                  <div class="task-meta">
+                    <span class="status-pill status-email">Email</span>
+                  </div>
+                </div>
+                <div class="task-actions">
+                  <button id="btn-hup-email" class="primary">Trigger Email</button>
+                </div>
+              </article>
+            </li>
+
+            <li class="pipeline-step pipeline-step-email">
+              <div class="pipeline-spine" aria-hidden="true">
+                <span class="pipeline-node">E2</span>
+                <span class="pipeline-connector"></span>
+              </div>
+              <article class="pipeline-card task-card">
+                <div class="task-header">
+                  <div class="task-title-wrap">
+                    <div class="task-title-row">
+                      <span class="task-index">E2</span>
+                      <div class="task-title">CRM IGW Bounce</div>
+                    </div>
+                    <div class="task-purpose">Email NPE support to reboot CRM IGW Domain 1 servers.</div>
+                  </div>
+                  <div class="task-meta">
+                    <span class="status-pill status-email">Email</span>
+                  </div>
+                </div>
+                <div class="task-actions">
+                  <button id="btn-crm-email" class="primary primary-alt">Trigger Email</button>
+                </div>
+              </article>
+            </li>
+          </ol>
+
+          <div id="email-feedback" class="feedback pipeline-feedback"></div>
+
+          <div class="pipeline-divider">
+            <span>Automation tasks</span>
           </div>
-          <div id="tasks-root" class="tasks-list"></div>
+
+          <ol id="tasks-root" class="pipeline-track tasks-list"></ol>
         </section>
       </main>
     </div>

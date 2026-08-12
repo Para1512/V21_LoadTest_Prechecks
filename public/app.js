@@ -101,9 +101,32 @@ function getStatusClass(status) {
 function renderTasks() {
   tasksRoot.innerHTML = "";
 
-  tasks.forEach((task) => {
+  tasks.forEach((task, index) => {
+    const step = document.createElement("li");
+    step.className = "pipeline-step pipeline-step-task";
+    if (task.status === "Running" || task.status === "In Progress") {
+      step.classList.add("is-active");
+    }
+    if (task.status === "Completed") {
+      step.classList.add("is-done");
+    }
+
+    const spine = document.createElement("div");
+    spine.className = "pipeline-spine";
+    spine.setAttribute("aria-hidden", "true");
+    const node = document.createElement("span");
+    node.className = "pipeline-node";
+    node.textContent = String(task.id);
+    const connector = document.createElement("span");
+    connector.className = "pipeline-connector";
+    if (index === tasks.length - 1) {
+      connector.classList.add("is-last");
+    }
+    spine.appendChild(node);
+    spine.appendChild(connector);
+
     const card = document.createElement("article");
-    card.className = "task-card";
+    card.className = "pipeline-card task-card";
 
     const header = document.createElement("div");
     header.className = "task-header";
@@ -214,7 +237,9 @@ function renderTasks() {
       card.appendChild(outputWrap);
     }
 
-    tasksRoot.appendChild(card);
+    step.appendChild(spine);
+    step.appendChild(card);
+    tasksRoot.appendChild(step);
   });
 }
 
