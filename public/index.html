@@ -3,27 +3,60 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Automation Portal</title>
+    <title>V21 PreChecks Portal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="container">
-      <h1>Automation Portal</h1>
-
-      <section class="panel">
-        <h2>Email Triggers</h2>
-        <div class="button-row">
-          <button id="btn-hup-email" class="primary">HUP Offer Cleanup - Trigger Email</button>
-          <button id="btn-crm-email" class="primary">CRM IGW Bounce - Trigger Email</button>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">V21</div>
+          <div class="brand-copy">
+            <p class="brand-kicker">Performance Engineering</p>
+            <h1>PreChecks Portal</h1>
+            <p class="brand-tag">
+              One place to validate data, disks, logs, and servers before V21 load tests.
+            </p>
+          </div>
         </div>
-        <div id="email-feedback" class="feedback"></div>
-      </section>
+        <div class="header-meta">
+          <span class="meta-chip">QE Console</span>
+          <span class="meta-chip meta-chip-soft">PET1 / VTS</span>
+        </div>
+      </header>
 
-      <section class="panel">
-        <h2>Automation Tasks</h2>
-        <div id="tasks-root" class="tasks-list"></div>
-      </section>
-    </main>
+      <main class="container">
+        <section class="panel panel-email">
+          <div class="panel-head">
+            <div>
+              <h2>Email triggers</h2>
+              <p class="panel-sub">Notify DBA / NPE support for manual prep steps.</p>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="btn-hup-email" class="primary">HUP Offer Cleanup — Trigger Email</button>
+            <button id="btn-crm-email" class="primary primary-alt">CRM IGW Bounce — Trigger Email</button>
+          </div>
+          <div id="email-feedback" class="feedback"></div>
+        </section>
+
+        <section class="panel panel-tasks">
+          <div class="panel-head">
+            <div>
+              <h2>Automation tasks</h2>
+              <p class="panel-sub">Run each precheck in order. Expand output for validation details.</p>
+            </div>
+          </div>
+          <div id="tasks-root" class="tasks-list"></div>
+        </section>
+      </main>
+    </div>
 
     <script src="./app.js"></script>
   </body>

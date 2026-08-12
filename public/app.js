@@ -109,13 +109,21 @@ function renderTasks() {
     header.className = "task-header";
 
     const titleWrap = document.createElement("div");
+    titleWrap.className = "task-title-wrap";
+    const titleRow = document.createElement("div");
+    titleRow.className = "task-title-row";
+    const indexBadge = document.createElement("span");
+    indexBadge.className = "task-index";
+    indexBadge.textContent = String(task.id).padStart(2, "0");
     const title = document.createElement("div");
     title.className = "task-title";
-    title.textContent = `Task ${task.id} - ${task.name}`;
+    title.textContent = task.name;
+    titleRow.appendChild(indexBadge);
+    titleRow.appendChild(title);
     const purpose = document.createElement("div");
     purpose.className = "task-purpose";
     purpose.textContent = task.purpose;
-    titleWrap.appendChild(title);
+    titleWrap.appendChild(titleRow);
     titleWrap.appendChild(purpose);
 
     const meta = document.createElement("div");
