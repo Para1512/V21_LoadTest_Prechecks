@@ -1,6 +1,5 @@
 const tasksRoot = document.getElementById("tasks-root");
 const emailFeedback = document.getElementById("email-feedback");
-const hupEmailButton = document.getElementById("btn-hup-email");
 const crmEmailButton = document.getElementById("btn-crm-email");
 
 function getApiBaseUrl() {
@@ -17,6 +16,16 @@ function getApiBaseUrl() {
 const API_BASE_URL = getApiBaseUrl();
 const SERVER_BOUNCE_PORTAL_URL = "http://nprapw000379.rci.rogers.ca/batch/create";
 const SERVER_BOUNCE_PORTAL_LABEL = "NPR — Create batch / bounce request";
+const HUP_OFFER_POLL_INTERVAL_MS = 5000;
+const TASK_IDS = Object.freeze({
+  DATA_LOADING: 1,
+  HUP_OFFER: 2,
+  LG_DISK: 3,
+  SERVER_LOG: 4,
+  SERVER_BOUNCE: 5,
+  SERVER_HEALTH: 6,
+  TRIGGER_SANITY: 7
+});
 
 function apiUrl(path) {
   return `${API_BASE_URL}${path}`;
@@ -46,32 +55,38 @@ const taskDefinitions = [
   },
   {
     id: 2,
+    name: "HUP Offer Cleanup",
+    purpose:
+      "Check HUP_OFFER records, start cleanup when needed, and monitor the job until the table is empty."
+  },
+  {
+    id: 3,
     name: "LG Disk Space Check",
     purpose: "Check disk space usage in LG systems.",
     runEndpoint: "/api/tasks/lg-disk-check/run"
   },
   {
-    id: 3,
+    id: 4,
     name: "Servers Log Space Check",
     purpose:
       "Fetch log path usage for all TUX, PRAPI, and APILINK hosts via NPE services; warn above 60% and auto-clean above 70%.",
     runEndpoint: "/api/tasks/server-log-check/run"
   },
   {
-    id: 4,
+    id: 5,
     name: "Server Bounce",
     purpose: "Restart required servers.",
     runEndpoint: "/api/tasks/server-bounce/run"
   },
   {
-    id: 5,
+    id: 6,
     name: "Server Health Check",
     purpose:
       "Fetches PET1-V21 from NPE services in the portal backend and shows TUX OLN / TUX API status here when processing finishes.",
     runEndpoint: "/api/tasks/server-health-check/run"
   },
   {
-    id: 6,
+    id: 7,
     name: "Trigger Sanity",
     purpose: "Run post-actions sanity validation (placeholder / simulated until real checks are added).",
     runEndpoint: "/api/tasks/trigger-sanity/run"
@@ -168,7 +183,9 @@ function renderTasks() {
     runButton.className = "run";
     runButton.textContent = "RUN";
     const bounceFormActive =
-      task.id === 4 && task.outputType === "server-bounce-form" && task.status === "In Progress";
+      task.id === TASK_IDS.SERVER_BOUNCE &&
+      task.outputType === "server-bounce-form" &&
+      task.status === "In Progress";
     runButton.disabled = task.status === "Running" || bounceFormActive;
     runButton.addEventListener("click", () => runTask(task.id));
 
@@ -180,7 +197,7 @@ function renderTasks() {
 
     actions.appendChild(runButton);
     actions.appendChild(skipButton);
-    if (task.id === 1) {
+    if (task.id === TASK_IDS.DATA_LOADING) {
       const dbBtn = document.createElement("button");
       dbBtn.type = "button";
       dbBtn.textContent = "Test Oracle DB";
@@ -1392,7 +1409,7 @@ function renderServerBounceForm(task) {
   resetBtn.className = "skip bounce-reset-btn";
   resetBtn.textContent = "Reset task";
   resetBtn.addEventListener("click", () => {
-    updateTask(4, {
+    updateTask(TASK_IDS.SERVER_BOUNCE, {
       status: "Pending",
       skipped: false,
       output: "",
@@ -1426,7 +1443,7 @@ function renderServerBounceForm(task) {
       if (result.completed) {
         const statusLine = result.statusName ? `Board status: ${result.statusName}` : "Board status: Done";
         const browse = result.browseUrl || `https://reqcentral.com/browse/${key}`;
-        updateTask(4, {
+        updateTask(TASK_IDS.SERVER_BOUNCE, {
           status: "Completed",
           skipped: false,
           output: [
@@ -1452,7 +1469,7 @@ function renderServerBounceForm(task) {
           "Task remains In Progress until the ticket is Done on the board."
         ].join("\n");
         feedback.textContent = msg;
-        updateTask(4, {
+        updateTask(TASK_IDS.SERVER_BOUNCE, {
           status: "In Progress",
           bounceCheckMessage: msg,
           outputType: "server-bounce-form",
@@ -1470,10 +1487,10 @@ function renderServerBounceForm(task) {
           ? `Board shows: "${result.statusName}". Open ReqCentral to confirm, then check again.`
           : "Could not determine status from the page. Open the ReqCentral link and verify on the board.");
       feedback.textContent = hint;
-      updateTask(4, { bounceCheckMessage: hint });
+      updateTask(TASK_IDS.SERVER_BOUNCE, { bounceCheckMessage: hint });
     } catch (err) {
       feedback.textContent = err.message || String(err);
-      updateTask(4, { bounceCheckMessage: feedback.textContent });
+      updateTask(TASK_IDS.SERVER_BOUNCE, { bounceCheckMessage: feedback.textContent });
     } finally {
       checkBtn.disabled = false;
     }
@@ -1488,7 +1505,7 @@ function updateTask(taskId, updates) {
 }
 
 async function runPetHealthTask() {
-  const taskId = 5;
+  const taskId = TASK_IDS.SERVER_HEALTH;
   updateTask(taskId, {
     status: "Running",
     skipped: false,
@@ -1537,7 +1554,7 @@ async function runPetHealthTask() {
 }
 
 async function runServerLogSpaceTask() {
-  const taskId = 3;
+  const taskId = TASK_IDS.SERVER_LOG;
   updateTask(taskId, {
     status: "Running",
     skipped: false,
@@ -1738,7 +1755,7 @@ function applyTask1FlowResult(flow) {
           (phase === "insufficient"
             ? "Validations failed after data reload."
             : "Task 1 finished with errors.");
-  updateTask(1, {
+  updateTask(TASK_IDS.DATA_LOADING, {
     status: "Completed",
     skipped: false,
     output,
@@ -1758,7 +1775,7 @@ function applyTask1FlowResult(flow) {
 }
 
 async function runTask1OracleTest() {
-  updateTask(1, {
+  updateTask(TASK_IDS.DATA_LOADING, {
     status: "Running",
     skipped: false,
     expanded: true,
@@ -1769,7 +1786,7 @@ async function runTask1OracleTest() {
   try {
     const res = await fetch(apiUrl("/api/oracle/test-connection"), { method: "POST" });
     const result = await res.json().catch(() => ({}));
-    updateTask(1, {
+    updateTask(TASK_IDS.DATA_LOADING, {
       status: "Completed",
       skipped: false,
       output: result.message || (result.connected ? "Oracle OK" : "Oracle failed"),
@@ -1778,7 +1795,7 @@ async function runTask1OracleTest() {
       expanded: true
     });
   } catch (err) {
-    updateTask(1, {
+    updateTask(TASK_IDS.DATA_LOADING, {
       status: "Completed",
       skipped: false,
       output: `Oracle test failed: ${formatFetchFailureMessage(err)}`,
@@ -1795,7 +1812,7 @@ async function runTask1OracleTest() {
 }
 
 async function runTask1VtsFlow() {
-  updateTask(1, {
+  updateTask(TASK_IDS.DATA_LOADING, {
     status: "Running",
     skipped: false,
     expanded: true,
@@ -1811,7 +1828,7 @@ async function runTask1VtsFlow() {
     }
     applyTask1FlowResult(flow);
   } catch (err) {
-    updateTask(1, {
+    updateTask(TASK_IDS.DATA_LOADING, {
       status: "Completed",
       skipped: false,
       output: `Task 1 failed: ${formatFetchFailureMessage(err)}`,
@@ -2096,26 +2113,175 @@ async function openVtsLimitsEditor() {
   });
 }
 
+function getResponseField(payload, names) {
+  if (!payload || typeof payload !== "object") return undefined;
+  const entries = Object.entries(payload);
+  for (const name of names) {
+    const match = entries.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    if (match && match[1] !== undefined && match[1] !== null && match[1] !== "") {
+      return match[1];
+    }
+  }
+  return undefined;
+}
+
+function parseRecordCount(payload, names) {
+  const value = getResponseField(payload, names);
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : null;
+}
+
+async function fetchTaskJson(path, options = {}) {
+  const response = await fetch(apiUrl(path), options);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.message || `Request failed with status ${response.status}`);
+  }
+  return result;
+}
+
+function waitForHupPoll() {
+  return new Promise((resolve) => setTimeout(resolve, HUP_OFFER_POLL_INTERVAL_MS));
+}
+
+async function runHupOfferCleanupTask() {
+  const taskId = TASK_IDS.HUP_OFFER;
+  const messages = ["Checking the current HUP_OFFER record count…"];
+  const showProgress = (message) => {
+    if (message) messages.push(message);
+    updateTask(taskId, {
+      status: "Running",
+      skipped: false,
+      output: messages.join("\n"),
+      outputType: "text",
+      outputData: null,
+      expanded: true
+    });
+  };
+
+  showProgress();
+  try {
+    const countResult = await fetchTaskJson("/api/tasks/hup-offer/count");
+    const initialCount = parseRecordCount(countResult, ["count", "currentCount", "recordCount"]);
+    if (initialCount === null) {
+      throw new Error("Count API response did not contain a valid count.");
+    }
+    if (initialCount === 0) {
+      updateTask(taskId, {
+        status: "Completed",
+        skipped: false,
+        output: "0 records in HUP_OFFER table.",
+        outputType: "text",
+        outputData: null,
+        expanded: true
+      });
+      return;
+    }
+
+    showProgress(`${initialCount} record(s) found. Starting HUP_OFFER cleanup…`);
+    const cleanResult = await fetchTaskJson("/api/tasks/hup-offer/clean", { method: "POST" });
+    const cleanStatus = String(getResponseField(cleanResult, ["status"]) || "").toLowerCase();
+    if (cleanStatus !== "success") {
+      throw new Error(
+        cleanResult.message || `Cleanup API returned status "${cleanStatus || "unknown"}".`
+      );
+    }
+
+    const pid = getResponseField(cleanResult, ["pid", "processId", "process_id"]);
+    const jobId = getResponseField(cleanResult, ["jobId", "job_id", "jobid"]);
+    if (pid === undefined || jobId === undefined) {
+      throw new Error("Cleanup API succeeded but did not return both pid and jobId.");
+    }
+    showProgress(`Cleanup script executed successfully (PID ${pid}, Job ID ${jobId}).`);
+
+    while (true) {
+      await waitForHupPoll();
+      const query = new URLSearchParams({ pid: String(pid), jobId: String(jobId) });
+      const jobResult = await fetchTaskJson(`/api/tasks/hup-offer/status?${query}`);
+      const jobStatus = String(getResponseField(jobResult, ["status"]) || "").toLowerCase();
+      if (jobStatus !== "completed") {
+        showProgress(`Cleanup status: ${jobStatus || "unknown"}. Checking again in 5 seconds…`);
+        continue;
+      }
+
+      const currentCount = parseRecordCount(jobResult, [
+        "currentCount",
+        "current_count",
+        "remainingCount",
+        "remaining_count",
+        "finalCount",
+        "final_count",
+        "count"
+      ]);
+      const reportedDeleted = parseRecordCount(jobResult, [
+        "deletedCount",
+        "deleted_count",
+        "recordsDeleted",
+        "records_deleted",
+        "rowsDeleted",
+        "rows_deleted",
+        "deleted"
+      ]);
+      const deletedCount =
+        reportedDeleted === null && currentCount !== null
+          ? Math.max(0, initialCount - currentCount)
+          : reportedDeleted;
+      const deletedText =
+        deletedCount === null ? "Deleted records: not reported." : `Records deleted: ${deletedCount}.`;
+      const currentText =
+        currentCount === null ? "Current count: not reported." : `Current count: ${currentCount}.`;
+      const summary = `${deletedText} ${currentText}`;
+
+      updateTask(taskId, {
+        status: currentCount === 0 ? "Completed" : "Pending",
+        skipped: false,
+        output:
+          currentCount === 0
+            ? `HUP_OFFER cleanup completed successfully. ${summary}`
+            : `Cleanup job completed, but HUP_OFFER is not empty. ${summary}`,
+        outputType: "text",
+        outputData: null,
+        expanded: true
+      });
+      return;
+    }
+  } catch (error) {
+    updateTask(taskId, {
+      status: "Pending",
+      skipped: false,
+      output: `HUP_OFFER cleanup failed: ${formatFetchFailureMessage(error)}`,
+      outputType: "text",
+      outputData: null,
+      expanded: true
+    });
+  }
+}
+
 async function runTask(taskId) {
   const selectedTask = tasks.find((task) => task.id === taskId);
   if (!selectedTask) return;
 
-  if (taskId === 1) {
+  if (taskId === TASK_IDS.DATA_LOADING) {
     void runTask1VtsFlow();
     return;
   }
 
-  if (taskId === 4) {
+  if (taskId === TASK_IDS.HUP_OFFER) {
+    void runHupOfferCleanupTask();
+    return;
+  }
+
+  if (taskId === TASK_IDS.SERVER_BOUNCE) {
     runTask4ServerBounce();
     return;
   }
 
-  if (taskId === 3) {
+  if (taskId === TASK_IDS.SERVER_LOG) {
     void runServerLogSpaceTask();
     return;
   }
 
-  if (taskId === 5) {
+  if (taskId === TASK_IDS.SERVER_HEALTH) {
     void runPetHealthTask();
     return;
   }
@@ -2133,7 +2299,7 @@ async function runTask(taskId) {
       const detail = result.message || `Request failed with status ${response.status}`;
       throw new Error(detail);
     }
-    const taskIsLgDiskCheck = taskId === 2;
+    const taskIsLgDiskCheck = taskId === TASK_IDS.LG_DISK;
     updateTask(taskId, {
       status: "Completed",
       skipped: false,
@@ -2157,7 +2323,7 @@ async function runTask(taskId) {
 }
 
 function runTask4ServerBounce() {
-  updateTask(4, {
+  updateTask(TASK_IDS.SERVER_BOUNCE, {
     status: "In Progress",
     skipped: false,
     output: "Server bounce — use the portal link, then verify your JIRA ticket.",
@@ -2202,10 +2368,6 @@ async function triggerEmail(buttonEl, endpoint, label) {
     buttonEl.textContent = originalText;
   }
 }
-
-hupEmailButton.addEventListener("click", () =>
-  triggerEmail(hupEmailButton, "/api/email/hup-offer-cleanup", "HUP Offer Cleanup")
-);
 
 crmEmailButton.addEventListener("click", () =>
   triggerEmail(crmEmailButton, "/api/email/crm-igw-bounce", "CRM IGW Bounce")

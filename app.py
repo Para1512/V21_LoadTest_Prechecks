@@ -59,6 +59,18 @@ PORT = _parse_port(os.environ.get("PORT"), 3000)
 HOST = (os.environ.get("HOST") or "0.0.0.0").strip() or "0.0.0.0"
 MOBAXTERM_EXE = (os.environ.get("MOBAXTERM_PATH") or r"C:\Moba\MobaXterm_Personal_24.0.exe").strip()
 TUX_BOUNCE_COMMAND = os.environ.get("TUX_BOUNCE_COMMAND", "get tuxedo bounce status")
+HUP_OFFER_COUNT_URL = os.environ.get(
+    "HUP_OFFER_COUNT_URL",
+    "http://npe-services:8888/cgi-bin/fetchPetV21HupOfferCount",
+).strip()
+HUP_OFFER_CLEAN_URL = os.environ.get(
+    "HUP_OFFER_CLEAN_URL",
+    "http://npe-services:8888/cgi-bin/cleanPetV21HupOfferTable",
+).strip()
+HUP_OFFER_STATUS_URL = os.environ.get(
+    "HUP_OFFER_STATUS_URL",
+    "http://npe-services:8888/cgi-bin/checkPetV21HupOfferCleanUpJobStatus",
+).strip()
 
 
 LG_DISK_SERVERS = {
@@ -99,6 +111,15 @@ def exec_powershell(command: str, timeout: int = 25) -> str:
 
 def delay(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def fetch_npe_json(url: str, params: dict | None = None) -> dict:
+    response = requests.get(url, params=params, timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("NPE service returned an unexpected non-object response.")
+    return payload
 
 
 def launch_mobaxterm() -> bool:
@@ -263,36 +284,6 @@ def send_portal_email(to_addr: str, cc_addr: str, subject: str, text: str) -> st
             smtp.send_message(msg)
 
     return msg["Message-ID"]
-
-
-@app.route("/api/email/hup-offer-cleanup", methods=["POST"])
-def email_hup():
-    try:
-        mid = send_portal_email(
-            to_addr='"#RCI_V21 DBA Support" <RCIV21DBASupport@rci.rogers.com>',
-            cc_addr='"QE Performance Engineering" <PerformanceTesting@rci.rogers.com>',
-            subject="Rogers V21 | PET | Test Preparatory Activities",
-            text="\n".join(
-                [
-                    "Hi @#RCI_V21 DBA Support,",
-                    "",
-                    "Can you please execute below query in PCUST_DB",
-                    "TRUNCATE table HUP_OFFER",
-                    "",
-                    "Thanks & Regards",
-                    "Para Chaitanya",
-                ]
-            ),
-        )
-        return jsonify(
-            {
-                "success": True,
-                "message": "HUP Offer Cleanup email triggered successfully.",
-                "messageId": mid,
-            }
-        )
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Failed to send HUP Offer Cleanup email: {e}"}), 500
 
 
 @app.route("/api/email/crm-igw-bounce", methods=["POST"])
@@ -490,6 +481,49 @@ def task_data_loading_vts_prep():
             ),
             500,
         )
+
+
+@app.route("/api/tasks/hup-offer/count", methods=["GET"])
+def task_hup_offer_count():
+    try:
+        return jsonify(fetch_npe_json(HUP_OFFER_COUNT_URL))
+    except Exception as e:
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Failed to fetch HUP_OFFER count: {str(e) or repr(e)}",
+            }
+        ), 502
+
+
+@app.route("/api/tasks/hup-offer/clean", methods=["POST"])
+def task_hup_offer_clean():
+    try:
+        return jsonify(fetch_npe_json(HUP_OFFER_CLEAN_URL))
+    except Exception as e:
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Failed to start HUP_OFFER cleanup: {str(e) or repr(e)}",
+            }
+        ), 502
+
+
+@app.route("/api/tasks/hup-offer/status", methods=["GET"])
+def task_hup_offer_status():
+    pid = (request.args.get("pid") or "").strip()
+    job_id = (request.args.get("jobId") or "").strip()
+    if not pid or not job_id:
+        return jsonify({"success": False, "message": "pid and jobId are required."}), 400
+    try:
+        return jsonify(fetch_npe_json(HUP_OFFER_STATUS_URL, {"pid": pid, "jobId": job_id}))
+    except Exception as e:
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Failed to check HUP_OFFER cleanup status: {str(e) or repr(e)}",
+            }
+        ), 502
 
 
 @app.route("/api/tasks/lg-disk-check/run", methods=["POST"])

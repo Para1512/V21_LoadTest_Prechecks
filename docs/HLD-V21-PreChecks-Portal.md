@@ -16,22 +16,6 @@ It checks that test data, disks, logs, and servers are ready — and sends the r
 
 ## Email triggers (top of the page)
 
-### HUP Offer Cleanup
-
-**What you want to happen**
-
-1. A JIRA Business Request (BR) is raised for the cleanup.
-2. An email goes to DBA Support with the BR attached.
-3. DBA runs `TRUNCATE TABLE HUP_OFFER` on PCUST_DB.
-
-**What the portal does today**
-
-- Click the button → email is sent to **RCI V21 DBA Support** (QE is CC’d).
-- Email asks DBA to truncate HUP_OFFER.
-- **JIRA BR creation and attachment are not automated yet** — you still raise the BR separately.
-
----
-
 ### CRM IGW Bounce Mail
 
 **What you want to happen**
@@ -147,7 +131,17 @@ When everything passes, old test columns are cleared.
 
 ---
 
-## Task 2 — LG Disk Space Check
+## Task 2 — HUP Offer Cleanup
+
+1. Read the current `HUP_OFFER` count from NPE services.
+2. If the count is zero, complete without starting a cleanup.
+3. Otherwise, start the cleanup and capture its `pid` and `jobId`.
+4. Poll the job-status API every five seconds until its status is `completed`.
+5. Show deleted and current record counts; mark the task complete when the current count is zero.
+
+---
+
+## Task 3 — LG Disk Space Check
 
 **Goal:** Make sure load generator (LG) machines have enough disk space.
 
@@ -169,7 +163,7 @@ You can click a drive in the table to open the server share for manual check.
 
 ---
 
-## Task 3 — Servers Log Space Check
+## Task 4 — Servers Log Space Check
 
 **Goal:** Make sure log folders on app servers are not filling up the disk.
 
@@ -191,7 +185,7 @@ Full activity log is shown in the task output.
 
 ---
 
-## Task 4 — Server Bounce
+## Task 5 — Server Bounce
 
 **Goal:** Bounce TUX servers through the proper change process and wait until JIRA says it’s done.
 
@@ -205,7 +199,7 @@ Full activity log is shown in the task output.
 
 ---
 
-## Task 5 — Server Health Check
+## Task 6 — Server Health Check
 
 **Goal:** Confirm TUX servers are **UP** before testing.
 
@@ -217,7 +211,7 @@ Full activity log is shown in the task output.
 
 ---
 
-## Task 6 — Trigger Sanity
+## Task 7 — Trigger Sanity
 
 **Goal:** Run sanity checks after everything else (placeholder for now).
 
@@ -227,14 +221,14 @@ Full activity log is shown in the task output.
 
 ## Suggested order to run everything
 
-1. HUP Offer Cleanup (email + JIRA BR)  
-2. CRM IGW Bounce (email + JIRA BR)  
-3. Task 1 — Data Loading  
-4. Task 2 — LG Disk Space  
-5. Task 3 — Servers Log Space  
-6. Task 4 — Server Bounce (wait for JIRA Done)  
-7. Task 5 — Server Health Check  
-8. Task 6 — Trigger Sanity (when ready)  
+1. CRM IGW Bounce (email + JIRA BR)
+2. Task 1 — Data Loading
+3. Task 2 — HUP Offer Cleanup
+4. Task 3 — LG Disk Space
+5. Task 4 — Servers Log Space
+6. Task 5 — Server Bounce (wait for JIRA Done)
+7. Task 6 — Server Health Check
+8. Task 7 — Trigger Sanity (when ready)
 
 ---
 

@@ -23,6 +23,15 @@ const HOST = (process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const MOBAXTERM_EXE = (
   process.env.MOBAXTERM_PATH || "C:\\Moba\\MobaXterm_Personal_24.0.exe"
 ).trim();
+const HUP_OFFER_COUNT_URL =
+  process.env.HUP_OFFER_COUNT_URL ||
+  "http://npe-services:8888/cgi-bin/fetchPetV21HupOfferCount";
+const HUP_OFFER_CLEAN_URL =
+  process.env.HUP_OFFER_CLEAN_URL ||
+  "http://npe-services:8888/cgi-bin/cleanPetV21HupOfferTable";
+const HUP_OFFER_STATUS_URL =
+  process.env.HUP_OFFER_STATUS_URL ||
+  "http://npe-services:8888/cgi-bin/checkPetV21HupOfferCleanUpJobStatus";
 
 function openDefaultBrowser(url) {
   const cmd =
@@ -40,6 +49,31 @@ app.use(express.static(path.join(__dirname, "public")));
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchNpeJson(url, params = null) {
+  const target = new URL(url);
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      target.searchParams.set(key, value);
+    }
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(target, { signal: controller.signal });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`NPE service returned HTTP ${response.status}: ${text.slice(0, 300)}`);
+    }
+    const payload = JSON.parse(text);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("NPE service returned an unexpected non-object response.");
+    }
+    return payload;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function execPowerShell(command, options = {}) {
@@ -204,36 +238,6 @@ async function sendPortalEmail({ to, cc, subject, text }) {
   return info;
 }
 
-app.post("/api/email/hup-offer-cleanup", async (_req, res) => {
-  try {
-    const info = await sendPortalEmail({
-      to: "\"#RCI_V21 DBA Support\" <RCIV21DBASupport@rci.rogers.com>",
-      cc: "\"QE Performance Engineering\" <PerformanceTesting@rci.rogers.com>",
-      subject: "Rogers V21 | PET | Test Preparatory Activities",
-      text: [
-        "Hi @#RCI_V21 DBA Support,",
-        "",
-        "Can you please execute below query in PCUST_DB",
-        "TRUNCATE table HUP_OFFER",
-        "",
-        "Thanks & Regards",
-        "Para Chaitanya"
-      ].join("\n")
-    });
-
-    res.json({
-      success: true,
-      message: "HUP Offer Cleanup email triggered successfully.",
-      messageId: info.messageId
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: `Failed to send HUP Offer Cleanup email: ${error.message}`
-    });
-  }
-});
-
 app.post("/api/email/crm-igw-bounce", async (_req, res) => {
   try {
     const info = await sendPortalEmail({
@@ -287,6 +291,45 @@ app.post("/api/tasks/data-loading/vts-precheck", async (_req, res) => {
 
 app.post("/api/tasks/data-loading/vts-prep", async (_req, res) => {
   res.status(501).json(dataLoadingPythonOnly);
+});
+
+app.get("/api/tasks/hup-offer/count", async (_req, res) => {
+  try {
+    res.json(await fetchNpeJson(HUP_OFFER_COUNT_URL));
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      message: `Failed to fetch HUP_OFFER count: ${error.message || String(error)}`
+    });
+  }
+});
+
+app.post("/api/tasks/hup-offer/clean", async (_req, res) => {
+  try {
+    res.json(await fetchNpeJson(HUP_OFFER_CLEAN_URL));
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      message: `Failed to start HUP_OFFER cleanup: ${error.message || String(error)}`
+    });
+  }
+});
+
+app.get("/api/tasks/hup-offer/status", async (req, res) => {
+  const pid = String(req.query.pid || "").trim();
+  const jobId = String(req.query.jobId || "").trim();
+  if (!pid || !jobId) {
+    res.status(400).json({ success: false, message: "pid and jobId are required." });
+    return;
+  }
+  try {
+    res.json(await fetchNpeJson(HUP_OFFER_STATUS_URL, { pid, jobId }));
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      message: `Failed to check HUP_OFFER cleanup status: ${error.message || String(error)}`
+    });
+  }
 });
 
 app.post("/api/tasks/lg-disk-check/run", async (_req, res) => {
