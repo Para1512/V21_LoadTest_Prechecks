@@ -115,8 +115,8 @@ You can view or edit these SQL queries using the **Oracle Queries** button.
 
 When everything passes, old test columns are cleared.
 
-- **VTS 2:** HUP_BAN, Resume_BAN  
-- **VTS 1:** NAC_BAN, PPC_BAN, TOR_BAN, AdSc_BAN, Cancel_BAN, Cancel_SUB_BAN, SmSw_BAN, BnAt_BAN, BYOD_BAN, AAL_BAN, VSY_BAN  
+- **VTS 2:** HUP_BAN, Resume_BAN, SmSw_BAN  
+- **VTS 1:** NAC_BAN, PPC_BAN, TOR_BAN, AdSc_BAN, Cancel_BAN, Cancel_SUB_BAN, BnAt_BAN, BYOD_BAN, AAL_BAN, VSY_BAN 
 
 **Done message:** *Old test data has been removed.*
 

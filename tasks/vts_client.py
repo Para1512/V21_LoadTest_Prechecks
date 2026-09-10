@@ -192,14 +192,13 @@ VTS1_CLEAR_COLUMNS = [
     "AdSc_BAN",
     "Cancel_BAN",
     "Cancel_SUB_BAN",
-    "SmSw_BAN",
     "BnAt_BAN",
     "BYOD_BAN",
     "AAL_BAN",
     "VSY_BAN",
 ]
 
-VTS2_CLEAR_COLUMNS = ["HUP_BAN", "Resume_BAN"]
+VTS2_CLEAR_COLUMNS = ["HUP_BAN", "Resume_BAN", "SmSw_BAN"]
 
 VTS_IMPORT_FIELD = "fileToUpload"
 
