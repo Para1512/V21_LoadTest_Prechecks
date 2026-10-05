@@ -963,10 +963,18 @@ function renderDataLoadingVts(od) {
     root.appendChild(renderVtsValidationSection(prep.validationDetails));
   }
 
-  if (prep?.prepCompleted) {
+  if (prep?.prepCompleted || prep?.clearDetails?.length) {
     const done = document.createElement("p");
-    done.className = "data-loading-vts-safe";
-    done.textContent = "Old test data has been removed — VTS prep completed.";
+    const clearOk = (prep.clearDetails || []).every((row) => row.success !== false);
+    done.className = clearOk ? "data-loading-vts-safe" : "data-loading-vts-unsafe";
+    if (prep.prepCompleted) {
+      done.textContent = "Old test data has been removed — VTS prep completed.";
+    } else if (clearOk) {
+      done.textContent =
+        "Old test data has been removed. Validations still need attention.";
+    } else {
+      done.textContent = "Old test data clear finished with one or more column failures.";
+    }
     root.appendChild(done);
   }
 
@@ -2113,13 +2121,21 @@ async function openVtsLimitsEditor() {
   });
 }
 
-function getResponseField(payload, names) {
-  if (!payload || typeof payload !== "object") return undefined;
+function isPresent(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+function getResponseField(payload, names, depth = 0) {
+  if (!payload || typeof payload !== "object" || depth > 4) return undefined;
   const entries = Object.entries(payload);
   for (const name of names) {
     const match = entries.find(([key]) => key.toLowerCase() === name.toLowerCase());
-    if (match && match[1] !== undefined && match[1] !== null && match[1] !== "") {
-      return match[1];
+    if (match && isPresent(match[1])) return match[1];
+  }
+  for (const value of Object.values(payload)) {
+    if (value && typeof value === "object") {
+      const nested = getResponseField(value, names, depth + 1);
+      if (isPresent(nested)) return nested;
     }
   }
   return undefined;
@@ -2170,7 +2186,7 @@ async function runHupOfferCleanupTask() {
       updateTask(taskId, {
         status: "Completed",
         skipped: false,
-        output: "0 records in HUP_OFFER table.",
+        output: "0 records in hup_offer table.",
         outputType: "text",
         outputData: null,
         expanded: true
@@ -2194,25 +2210,43 @@ async function runHupOfferCleanupTask() {
     }
     showProgress(`Cleanup script executed successfully (PID ${pid}, Job ID ${jobId}).`);
 
+    let sawStatus = false;
     while (true) {
-      await waitForHupPoll();
+      if (sawStatus) await waitForHupPoll();
+      sawStatus = true;
       const query = new URLSearchParams({ pid: String(pid), jobId: String(jobId) });
       const jobResult = await fetchTaskJson(`/api/tasks/hup-offer/status?${query}`);
-      const jobStatus = String(getResponseField(jobResult, ["status"]) || "").toLowerCase();
-      if (jobStatus !== "completed") {
+      const jobStatus = String(getResponseField(jobResult, ["status", "state"]) || "")
+        .toLowerCase()
+        .trim();
+      if (jobStatus === "failed" || jobStatus === "failure" || jobStatus === "error") {
+        throw new Error(
+          getResponseField(jobResult, ["message", "error", "errorMessage"]) ||
+            `Cleanup job failed with status "${jobStatus}".`
+        );
+      }
+      if (jobStatus !== "completed" && jobStatus !== "complete") {
+        const progress = messages.filter((line) => !line.startsWith("Cleanup status:"));
+        messages.length = 0;
+        messages.push(...progress);
         showProgress(`Cleanup status: ${jobStatus || "unknown"}. Checking again in 5 seconds…`);
         continue;
       }
 
-      const currentCount = parseRecordCount(jobResult, [
+      let currentCount = parseRecordCount(jobResult, [
         "currentCount",
         "current_count",
         "remainingCount",
         "remaining_count",
         "finalCount",
         "final_count",
+        "recordCount",
         "count"
       ]);
+      if (currentCount === null) {
+        const recount = await fetchTaskJson("/api/tasks/hup-offer/count");
+        currentCount = parseRecordCount(recount, ["count", "currentCount", "recordCount"]);
+      }
       const reportedDeleted = parseRecordCount(jobResult, [
         "deletedCount",
         "deleted_count",
@@ -2220,6 +2254,7 @@ async function runHupOfferCleanupTask() {
         "records_deleted",
         "rowsDeleted",
         "rows_deleted",
+        "noOfRecordsDeleted",
         "deleted"
       ]);
       const deletedCount =

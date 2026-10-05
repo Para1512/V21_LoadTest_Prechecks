@@ -1190,11 +1190,26 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
             messages.extend(precheck.get("messages") or [])
 
     if not precheck.get("canProceed"):
+        messages.append(
+            "Pre-check failed — removing old test data anyway (mandatory)."
+        )
+        clear_details = _clear_old_test_columns(messages)
+        prep = {
+            "success": False,
+            "type": "data-loading-vts-prep",
+            "message": "Pre-check failed. Old test data was still cleared.",
+            "validationPassed": False,
+            "dataDetails": {},
+            "validationDetails": [],
+            "clearDetails": clear_details,
+            "messages": [],
+            "prepCompleted": False,
+        }
         return {
             "success": False,
             "phase": "insufficient",
             "precheck": precheck,
-            "prep": None,
+            "prep": prep,
             "remediation": remediation_runs,
             "messages": messages,
             "guidance": build_user_guidance(precheck=precheck),
@@ -1241,6 +1256,37 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
         "validationSummary": build_validation_summary(precheck=precheck, prep=prep),
         "queryDefaults": query_defaults(),
     }
+
+
+def _clear_old_test_columns(messages: list[str]) -> list[dict[str, Any]]:
+    """Clear legacy test columns on VTS 1 and VTS 2. Always attempted."""
+    messages.append("=== Removing old test data ===")
+    clear_details: list[dict[str, Any]] = []
+    targets = (
+        ("VTS 2", VTS2_URL, vts.VTS2_CLEAR_COLUMNS),
+        ("VTS 1", VTS1_URL, vts.VTS1_CLEAR_COLUMNS),
+    )
+    for label, url, columns in targets:
+        for col in columns:
+            try:
+                vts.clear_column(url, col)
+                clear_details.append({"vts": label, "column": col, "success": True})
+                messages.append(f"  Cleared {label} — {col}: Passed")
+            except Exception as exc:
+                clear_details.append(
+                    {
+                        "vts": label,
+                        "column": col,
+                        "success": False,
+                        "message": str(exc),
+                    }
+                )
+                messages.append(f"  Cleared {label} — {col}: Failed — {exc}")
+    if clear_details and all(row["success"] for row in clear_details):
+        messages.append("Old test data has been removed.")
+    else:
+        messages.append("Old test data clear finished with one or more failures.")
+    return clear_details
 
 
 def _prep_validation_columns() -> tuple[list[str], list[str]]:
@@ -1458,72 +1504,65 @@ def run_vts_prep() -> dict[str, Any]:
 
     all_passed = all(v["passed"] for v in validation_details)
 
-    def _prep_fail(message: str) -> dict[str, Any]:
+    failure_message: str | None = None
+    if not v1_entry["passed"]:
+        failure_message = "P_BAN & P_SUBSCRIBER data is not aligned."
+    else:
+        for v in validation_details:
+            if v["id"] in (
+                "vts1-p_sim",
+                "vts2-p_sim",
+                "vts1-p_imei_ip14128pur",
+                "vts2-p_new_imei",
+                "vts2-p_ban_h",
+            ) and not v["passed"]:
+                failure_message = v["message"]
+                break
+        if failure_message is None and (not v2c_entry["passed"] or not v2h_entry["passed"]):
+            detail = []
+            if not v2c_entry["passed"]:
+                detail.append("current subscriber/device columns")
+            if not v2h_entry["passed"]:
+                detail.append("history columns")
+            failure_message = f"VTS 2 data is not aligned ({' and '.join(detail)})."
+
+    if failure_message:
+        messages.append(
+            "Validation did not pass — removing old test data anyway (mandatory)."
+        )
+
+    clear_details = _clear_old_test_columns(messages)
+    clear_ok = bool(clear_details) and all(row.get("success") for row in clear_details)
+
+    if failure_message:
         fail_prep = {
             "success": False,
             "type": "data-loading-vts-prep",
-            "message": message,
+            "message": failure_message,
             "validationPassed": False,
             "dataDetails": data_details,
             "validationDetails": validation_details,
-            "clearDetails": [],
+            "clearDetails": clear_details,
             "messages": messages,
             "prepCompleted": False,
         }
         fail_prep["queryDefaults"] = query_defaults()
         return fail_prep
 
-    if not v1_entry["passed"]:
-        return _prep_fail("P_BAN & P_SUBSCRIBER data is not aligned.")
-    for v in validation_details:
-        if v["id"] in (
-            "vts1-p_sim",
-            "vts2-p_sim",
-            "vts1-p_imei_ip14128pur",
-            "vts2-p_new_imei",
-            "vts2-p_ban_h",
-        ) and not v["passed"]:
-            return _prep_fail(v["message"])
-    if not v2c_entry["passed"] or not v2h_entry["passed"]:
-        detail = []
-        if not v2c_entry["passed"]:
-            detail.append("current subscriber/device columns")
-        if not v2h_entry["passed"]:
-            detail.append("history columns")
-        return _prep_fail(f"VTS 2 data is not aligned ({' and '.join(detail)}).")
-
-    messages.append("=== Removing old test data ===")
-    clear_details: list[dict[str, Any]] = []
-    for col in vts.VTS2_CLEAR_COLUMNS:
-        result = vts.clear_column(VTS2_URL, col)
-        entry = {
-            "vts": "VTS 2",
-            "column": col,
-            "success": True,
-        }
-        clear_details.append(entry)
-        messages.append(f"  Cleared VTS 2 — {col}: Passed")
-    for col in vts.VTS1_CLEAR_COLUMNS:
-        result = vts.clear_column(VTS1_URL, col)
-        entry = {
-            "vts": "VTS 1",
-            "column": col,
-            "success": True,
-        }
-        clear_details.append(entry)
-        messages.append(f"  Cleared VTS 1 — {col}: Passed")
-
-    messages.append("Old test data has been removed.")
     return {
-        "success": True,
+        "success": clear_ok and all_passed,
         "type": "data-loading-vts-prep",
         "validationPassed": all_passed,
         "dataDetails": data_details,
         "validationDetails": validation_details,
         "clearDetails": clear_details,
         "messages": messages,
-        "prepCompleted": True,
-        "message": "Old test data has been removed.",
+        "prepCompleted": clear_ok,
+        "message": (
+            "Old test data has been removed."
+            if clear_ok
+            else "Validations passed, but clearing old test data had failures."
+        ),
     }
 
 
