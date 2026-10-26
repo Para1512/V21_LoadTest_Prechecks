@@ -31,7 +31,7 @@ function hostLine(group) {
   return `Servers: ${found}.${missing}`;
 }
 
-function renderReport(group) {
+function renderReport(group, threshold) {
   const section = document.createElement("section");
   section.className = "results-report";
 
@@ -71,6 +71,7 @@ function renderReport(group) {
       const cell = document.createElement("td");
       cell.textContent = value;
       if (index === 0) cell.className = "results-service";
+      if (index === 1 && Number(value) > threshold) cell.classList.add("results-high");
       tr.appendChild(cell);
     });
     tbody.appendChild(tr);
@@ -82,7 +83,7 @@ function renderReport(group) {
 
 function textReport(payload) {
   const lines = [
-    `V21 Tuxedo Results — ${payload.window.date} ${payload.window.from} to ${payload.window.until}`,
+    `PET Enhanced report — ${payload.window.date} ${payload.window.from} to ${payload.window.until}`,
     ""
   ];
   [payload.online, payload.api].forEach((group) => {
@@ -100,7 +101,7 @@ function downloadCombinedReport(payload) {
   const blob = new Blob([textReport(payload)], { type: "text/plain;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `tuxedo_combined_${payload.window.date}_${payload.window.from.replace(":", "")}-${payload.window.until.replace(":", "")}.txt`;
+  link.download = `pet_enhanced_${payload.window.date}_${payload.window.from.replace(":", "")}-${payload.window.until.replace(":", "")}.txt`;
   link.click();
   URL.revokeObjectURL(link.href);
 }
@@ -108,9 +109,22 @@ function downloadCombinedReport(payload) {
 async function copyCombinedReport(payload) {
   try {
     await navigator.clipboard.writeText(textReport(payload));
-    setFeedback("Combined results copied to the clipboard.", "ok");
+    setFeedback("PET Enhanced report copied.", "ok");
   } catch (_error) {
-    setFeedback("Could not access the clipboard. Use Download combined results instead.", "error");
+    setFeedback("Could not access the clipboard. Use Download PET Enhanced report instead.", "error");
+  }
+}
+
+async function copyNpeReport(payload) {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/results/${encodeURIComponent(payload.reportId)}/raw?download=0`
+    );
+    if (!response.ok) throw new Error("The NPE report is no longer available. Run Collate again.");
+    await navigator.clipboard.writeText(await response.text());
+    setFeedback("NPE report copied.", "ok");
+  } catch (error) {
+    setFeedback(formatFetchFailureMessage(error), "error");
   }
 }
 
@@ -140,7 +154,7 @@ async function compareResponseTimes(minutes) {
     setFeedback(
       lastComparison.updates.length
         ? `Updated ${lastComparison.updates.length} abnormal response time(s) using the first ${minutes} minutes. Total calls were kept from the original test window.`
-        : `No normal response times were found in the first ${minutes} minutes. The original averages were kept.`,
+        : `The first ${minutes} minutes still showed those services at 10 seconds or more, so the NPE averages were kept.`,
       "ok"
     );
   } catch (error) {
@@ -151,38 +165,50 @@ async function compareResponseTimes(minutes) {
   }
 }
 
+function actionButton(label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function renderActions(payload) {
-  const actions = document.createElement("div");
-  actions.className = "results-actions";
+  const wrap = document.createElement("div");
 
   if (payload.reportId) {
+    const npe = document.createElement("div");
+    npe.className = "results-action-group";
+    const npeLabel = document.createElement("span");
+    npeLabel.className = "results-action-label";
+    npeLabel.textContent = "NPE report";
+    npe.appendChild(npeLabel);
     const viewRaw = document.createElement("a");
     viewRaw.className = "results-action";
     viewRaw.href = `${API_BASE_URL}/api/results/${encodeURIComponent(payload.reportId)}/raw?download=0`;
     viewRaw.target = "_blank";
     viewRaw.rel = "noopener";
-    viewRaw.textContent = "View raw NPE report";
-    actions.appendChild(viewRaw);
-
-    const raw = document.createElement("a");
-    raw.className = "results-action";
-    raw.href = `${API_BASE_URL}/api/results/${encodeURIComponent(payload.reportId)}/raw`;
-    raw.textContent = payload.file ? `Download raw NPE report (${payload.file})` : "Download raw NPE report";
-    actions.appendChild(raw);
+    viewRaw.textContent = "View";
+    npe.appendChild(viewRaw);
+    const downloadRaw = document.createElement("a");
+    downloadRaw.className = "results-action";
+    downloadRaw.href = `${API_BASE_URL}/api/results/${encodeURIComponent(payload.reportId)}/raw`;
+    downloadRaw.textContent = "Download";
+    npe.appendChild(downloadRaw);
+    npe.appendChild(actionButton("Copy", () => void copyNpeReport(payload)));
+    wrap.appendChild(npe);
   }
 
-  const download = document.createElement("button");
-  download.type = "button";
-  download.textContent = "Download combined results";
-  download.addEventListener("click", () => downloadCombinedReport(payload));
-  actions.appendChild(download);
-
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.textContent = "Copy combined results";
-  copy.addEventListener("click", () => void copyCombinedReport(payload));
-  actions.appendChild(copy);
-  return actions;
+  const enhanced = document.createElement("div");
+  enhanced.className = "results-action-group";
+  const enhancedLabel = document.createElement("span");
+  enhancedLabel.className = "results-action-label";
+  enhancedLabel.textContent = "PET Enhanced report";
+  enhanced.appendChild(enhancedLabel);
+  enhanced.appendChild(actionButton("Download", () => downloadCombinedReport(payload)));
+  enhanced.appendChild(actionButton("Copy", () => void copyCombinedReport(payload)));
+  wrap.appendChild(enhanced);
+  return wrap;
 }
 
 function renderAbnormalResponseTimes(payload) {
@@ -190,11 +216,11 @@ function renderAbnormalResponseTimes(payload) {
   const section = document.createElement("section");
   section.className = "results-abnormal";
   const title = document.createElement("h3");
-  title.textContent = "Response-time review needed";
+  title.textContent = "Abnormal response times";
   section.appendChild(title);
   const note = document.createElement("p");
   note.className = "results-note";
-  note.textContent = `${payload.abnormal.length} server-service response time(s) are at least ${payload.abnormalThreshold} seconds. Compare them with an earlier period; only a normal value replaces the average. Original total calls do not change.`;
+  note.textContent = `${payload.abnormal.length} service response time(s) are above ${payload.abnormalThreshold} seconds. Compare the same server and service from the start of the test. A value under ${payload.abnormalThreshold} seconds replaces the average. Total calls stay from the full NPE report.`;
   section.appendChild(note);
 
   const list = document.createElement("ul");
@@ -212,10 +238,31 @@ function renderAbnormalResponseTimes(payload) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.comparisonMinutes = String(minutes);
-    button.textContent = `Compare first ${minutes} min`;
+    button.textContent = `First ${minutes} min`;
     button.addEventListener("click", () => void compareResponseTimes(minutes));
     buttons.appendChild(button);
   });
+  const custom = document.createElement("input");
+  custom.type = "number";
+  custom.min = "1";
+  custom.step = "1";
+  custom.placeholder = "Minutes";
+  custom.className = "results-custom-minutes";
+  custom.setAttribute("aria-label", "Custom comparison minutes");
+  const customButton = document.createElement("button");
+  customButton.type = "button";
+  customButton.dataset.comparisonMinutes = "custom";
+  customButton.textContent = "Compare custom time";
+  customButton.addEventListener("click", () => {
+    const minutes = Number(custom.value);
+    if (!Number.isInteger(minutes) || minutes < 1) {
+      setFeedback("Enter a whole number of minutes for the custom comparison.", "error");
+      return;
+    }
+    void compareResponseTimes(minutes);
+  });
+  buttons.appendChild(custom);
+  buttons.appendChild(customButton);
   section.appendChild(buttons);
   return section;
 }
@@ -229,8 +276,10 @@ function renderResult(payload) {
     payload.window && payload.window.startAfter
       ? ` Report window ${payload.window.startAfter} to ${payload.window.endBefore}.`
       : "";
-  summary.textContent = `Combined from ${payload.window.date} ${payload.window.from}–${payload.window.until}.${fileBit}${windowBit}`;
+  summary.textContent = `PET Enhanced report for ${payload.window.date} ${payload.window.from}–${payload.window.until}.${fileBit}${windowBit}`;
   output.appendChild(summary);
+  const abnormalReview = renderAbnormalResponseTimes(payload);
+  if (abnormalReview) output.appendChild(abnormalReview);
   output.appendChild(renderActions(payload));
 
   if (payload.comparisons?.length) {
@@ -245,7 +294,7 @@ function renderResult(payload) {
     const note = document.createElement("p");
     note.className = "results-note";
     note.textContent =
-      "Averages currently use the reported totals column.";
+      "PET Enhanced averages currently match the NPE totals column.";
     output.appendChild(note);
   } else {
     const note = document.createElement("p");
@@ -256,10 +305,8 @@ function renderResult(payload) {
     output.appendChild(note);
   }
 
-  output.appendChild(renderReport(payload.online));
-  output.appendChild(renderReport(payload.api));
-  const abnormalReview = renderAbnormalResponseTimes(payload);
-  if (abnormalReview) output.appendChild(abnormalReview);
+  output.appendChild(renderReport(payload.online, payload.abnormalThreshold));
+  output.appendChild(renderReport(payload.api, payload.abnormalThreshold));
 
   if (payload.ignoredHosts && payload.ignoredHosts.length) {
     const extra = document.createElement("p");

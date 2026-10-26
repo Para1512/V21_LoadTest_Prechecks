@@ -1424,6 +1424,13 @@ a.window-link:hover {
   box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
 }
 
+.results-field input[type="date"]::-webkit-calendar-picker-indicator,
+.results-field input[type="time"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(1) brightness(1.6);
+  opacity: 1;
+}
+
 .results-hint {
   margin: 10px 0 0;
   color: var(--muted);
@@ -1478,11 +1485,37 @@ a.window-link:hover {
   font-size: 0.84rem;
 }
 
+.results-action-group,
 .results-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 12px 0;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.results-action-label {
+  min-width: 11rem;
+  color: var(--accent-ink);
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.results-custom-minutes {
+  width: 110px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-0);
+  color: var(--ink);
+  font: inherit;
+}
+
+.results-high {
+  color: #fde68a;
+  font-weight: 750;
 }
 
 .results-actions button,
@@ -1517,6 +1550,10 @@ a.window-link:hover {
   margin: 0;
   color: #fde68a;
   font-size: 1rem;
+}
+
+.results-abnormal .results-note {
+  color: var(--ink-soft);
 }
 
 .results-abnormal-list {

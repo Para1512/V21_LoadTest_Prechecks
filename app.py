@@ -14,6 +14,7 @@ import ssl
 import subprocess
 import threading
 import time
+import uuid
 import webbrowser
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -27,7 +28,7 @@ from tasks.reqcentral_status import check_reqcentral_issue
 from tasks.pet_health import PET_HEALTH_URL, run_pet_health_check
 from tasks.server_log_space import run_server_log_space_check
 from tasks.env_loader import load_project_env
-from tasks.tuxedo_stats_collate import CollateError, collect_and_collate
+from tasks.tuxedo_stats_collate import CollateError, collect_and_collate, compare_abnormal_services
 
 BASE_DIR = Path(__file__).resolve().parent
 _ENV_BOOT = load_project_env(create_from_example=True)
@@ -42,6 +43,7 @@ PUBLIC_DIR = BASE_DIR / "public"
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
+RESULT_REPORTS: dict[str, dict] = {}
 
 
 def _parse_port(value: str | None, fallback: int) -> int:
@@ -653,11 +655,45 @@ def task_server_health():
 @app.route("/api/results/collate", methods=["POST"])
 def results_collate():
     try:
-        return jsonify(collect_and_collate(request.get_json(silent=True) or {}))
+        state, payload = collect_and_collate(request.get_json(silent=True) or {})
+        report_id = str(uuid.uuid4())
+        RESULT_REPORTS[report_id] = state
+        payload["reportId"] = report_id
+        return jsonify(payload)
     except CollateError as exc:
         return jsonify({"success": False, "message": str(exc)}), exc.status_code
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc) or "Collate failed."}), 500
+
+
+@app.route("/api/results/<report_id>/raw", methods=["GET"])
+def results_raw(report_id: str):
+    report = RESULT_REPORTS.get(report_id)
+    if not report:
+        return jsonify({"success": False, "message": "The report session has expired. Run Collate again."}), 404
+    filename = report.get("file") or (
+        f"tuxedo_stats_{report['window']['date']}_{report['window']['from'].replace(':', '')}.out"
+    )
+    response = Response(report["rawReport"], mimetype="text/plain")
+    if request.args.get("download", "1") != "0":
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@app.route("/api/results/<report_id>/compare", methods=["POST"])
+def results_compare(report_id: str):
+    report = RESULT_REPORTS.get(report_id)
+    if not report:
+        return jsonify({"success": False, "message": "The report session has expired. Run Collate again."}), 404
+    try:
+        body = request.get_json(silent=True) or {}
+        payload = compare_abnormal_services(report, body.get("minutes"))
+        payload["reportId"] = report_id
+        return jsonify(payload)
+    except CollateError as exc:
+        return jsonify({"success": False, "message": str(exc)}), exc.status_code
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc) or "Response-time comparison failed."}), 500
 
 
 @app.route("/api/tasks/trigger-sanity/run", methods=["POST"])

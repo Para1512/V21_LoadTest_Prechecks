@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 from datetime import datetime
@@ -15,6 +16,7 @@ REQUEST_TIMEOUT_S = int(os.environ.get("TUX_IO_REPORT_TIMEOUT_MS") or "180000") 
 
 ONLINE_HOSTS = ("VLRENBPTCOLAP01", "VLRENBPTCOLAP02")
 API_HOSTS = tuple(f"VLRENBPTTUXAP{index:02d}" for index in range(1, 11))
+ABNORMAL_RESPONSE_SECONDS = float(os.environ.get("TUX_IO_ABNORMAL_RESPONSE_SECONDS") or "10")
 
 # Replace a service TOTALS average before servers are combined.
 # {"service": "csSvApiBan00", "avg": 0.10, "host": "VLRENBPTTUXAP01"}
@@ -216,18 +218,44 @@ def _group_report(all_blocks: list[dict], hosts: tuple[str, ...], title: str) ->
     }
 
 
-def collate_parsed_report(text: str) -> dict:
-    parsed = parse_tuxedo_report(text)
+def collate_blocks(blocks: list[dict], notes: list[str] | None = None) -> dict:
     known = set(ONLINE_HOSTS) | set(API_HOSTS)
-    online = _group_report(parsed["blocks"], ONLINE_HOSTS, "Online report")
-    api = _group_report(parsed["blocks"], API_HOSTS, "API report")
+    online = _group_report(blocks, ONLINE_HOSTS, "Online report")
+    api = _group_report(blocks, API_HOSTS, "API report")
     return {
-        "notes": parsed["notes"],
-        "ignoredHosts": [block["host"] for block in parsed["blocks"] if block["host"] not in known],
+        "notes": notes or [],
+        "ignoredHosts": [block["host"] for block in blocks if block["host"] not in known],
         "online": online,
         "api": api,
         "corrections": online["corrections"] + api["corrections"],
     }
+
+
+def collate_parsed_report(text: str) -> dict:
+    parsed = parse_tuxedo_report(text)
+    return collate_blocks(parsed["blocks"], parsed["notes"])
+
+
+def find_abnormal_services(blocks: list[dict]) -> list[dict]:
+    known = set(ONLINE_HOSTS) | set(API_HOSTS)
+    abnormal = []
+    for block in blocks:
+        if block["host"] not in known:
+            continue
+        for row in block["services"]:
+            if row["avg"] <= ABNORMAL_RESPONSE_SECONDS:
+                continue
+            abnormal.append(
+                {
+                    "host": block["host"],
+                    "group": "Online" if block["host"] in ONLINE_HOSTS else "API",
+                    "service": row["service"],
+                    "avgResponseTime": _format_avg(row["avg"]),
+                    "totalCalls": row["calls"],
+                }
+            )
+    abnormal.sort(key=lambda item: (-float(item["avgResponseTime"]), item["host"], item["service"]))
+    return abnormal
 
 
 def _looks_like_report(text: str) -> bool:
@@ -277,8 +305,15 @@ def _fetch_text(url: str, params: dict | None = None) -> str:
     return response.text
 
 
-def collect_and_collate(body: dict | None) -> dict:
-    window = normalize_collate_input(body)
+def _add_minutes(hhmm: str, minutes: int) -> str:
+    start = int(hhmm[:2]) * 60 + int(hhmm[3:])
+    end = start + minutes
+    if end > 24 * 60:
+        raise CollateError("The selected comparison period extends past midnight.")
+    return f"{end // 60:02d}:{end % 60:02d}"
+
+
+def _collect_report(window: dict) -> dict:
     collect_body = _fetch_text(
         REPORT_URL,
         {
@@ -302,18 +337,20 @@ def collect_and_collate(body: dict | None) -> dict:
         )
     else:
         report_text = _extract_report_text(collect_body)
-
     if not _looks_like_report(report_text):
         raise CollateError("The downloaded file is not a Tuxedo service summary report.", 502)
+    return {"file": file_name, "reportText": report_text, "parsed": parse_tuxedo_report(report_text)}
 
-    collated = collate_parsed_report(report_text)
+
+def response_for_state(state: dict) -> dict:
+    collated = collate_blocks(state["blocks"], state["notes"])
     return {
         "success": True,
-        "file": file_name,
+        "file": state["file"],
         "window": {
-            "date": window["date"],
-            "from": window["from"],
-            "until": window["until"],
+            "date": state["window"]["date"],
+            "from": state["window"]["from"],
+            "until": state["window"]["until"],
             "startAfter": collated["online"]["startAfter"] or collated["api"]["startAfter"],
             "endBefore": collated["online"]["endBefore"] or collated["api"]["endBefore"],
         },
@@ -332,4 +369,80 @@ def collect_and_collate(body: dict | None) -> dict:
             "missing": collated["api"]["missing"],
             "rows": collated["api"]["rows"],
         },
+        "abnormal": find_abnormal_services(state["blocks"]),
+        "abnormalThreshold": ABNORMAL_RESPONSE_SECONDS,
+        "comparisons": state["comparisons"],
     }
+
+
+def collect_and_collate(body: dict | None) -> tuple[dict, dict]:
+    window = normalize_collate_input(body)
+    report = _collect_report(window)
+    state = {
+        "file": report["file"],
+        "rawReport": report["reportText"],
+        "blocks": copy.deepcopy(report["parsed"]["blocks"]),
+        "notes": report["parsed"]["notes"],
+        "window": window,
+        "comparisons": [],
+    }
+    return state, response_for_state(state)
+
+
+def compare_abnormal_services(state: dict, duration_minutes) -> dict:
+    try:
+        minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        minutes = 0
+    if minutes < 1 or str(duration_minutes).strip() != str(minutes):
+        raise CollateError("Enter a whole number of minutes for the comparison.")
+    abnormal_before = find_abnormal_services(state["blocks"])
+    if not abnormal_before:
+        return response_for_state(state)
+
+    compare_window = {
+        "date": state["window"]["date"],
+        "from": state["window"]["from"],
+        "until": _add_minutes(state["window"]["from"], minutes),
+    }
+    original_end = int(state["window"]["until"][:2]) * 60 + int(state["window"]["until"][3:])
+    compare_end = int(compare_window["until"][:2]) * 60 + int(compare_window["until"][3:])
+    if compare_end > original_end:
+        raise CollateError("The comparison period cannot be longer than the original test window.")
+
+    comparison_report = _collect_report(compare_window)
+    by_key = {
+        f"{block['host']}|{service['service']}": service
+        for block in comparison_report["parsed"]["blocks"]
+        for service in block["services"]
+    }
+    updates = []
+    for candidate in abnormal_before:
+        replacement = by_key.get(f"{candidate['host']}|{candidate['service']}")
+        if not replacement or replacement["avg"] >= ABNORMAL_RESPONSE_SECONDS:
+            continue
+        original_block = next(block for block in state["blocks"] if block["host"] == candidate["host"])
+        original_service = next(
+            service for service in original_block["services"] if service["service"] == candidate["service"]
+        )
+        previous = original_service["avg"]
+        original_service["avg"] = replacement["avg"]
+        original_service["corrected"] = True
+        updates.append(
+            {
+                "host": candidate["host"],
+                "service": candidate["service"],
+                "from": _format_avg(previous),
+                "to": _format_avg(replacement["avg"]),
+                "totalCalls": original_service["calls"],
+            }
+        )
+    state["comparisons"].append(
+        {
+            "minutes": minutes,
+            "file": comparison_report["file"],
+            "compared": len(abnormal_before),
+            "updates": updates,
+        }
+    )
+    return response_for_state(state)
