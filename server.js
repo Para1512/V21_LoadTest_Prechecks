@@ -7,6 +7,7 @@ const { execFile, exec } = require("child_process");
 const { runServerLogSpaceCheck } = require("./lib/taskServerLogSpace");
 const { runPetHealthCheck, PET_HEALTH_URL } = require("./lib/taskPetHealth");
 const { checkReqcentralIssue } = require("./lib/reqcentralStatus");
+const { collectAndCollate } = require("./lib/tuxedoStatsCollate");
 
 const app = express();
 
@@ -453,6 +454,18 @@ app.post("/api/tasks/server-health-check/run", async (_req, res) => {
   }
 });
 
+app.post("/api/results/collate", async (req, res) => {
+  try {
+    const payload = await collectAndCollate(req.body || {});
+    res.json(payload);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Collate failed."
+    });
+  }
+});
+
 app.post("/api/tasks/trigger-sanity/run", async (_req, res) => {
   const output = await simulateTaskRun(
     "Trigger Sanity",
@@ -491,6 +504,10 @@ app.post("/api/jira/issue-status", async (req, res) => {
 
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.get("/results", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "results.html"));
 });
 
 const server = app.listen(PORT, HOST, () => {

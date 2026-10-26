@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>V21 Results Preparation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">V21</div>
+          <div class="brand-copy">
+            <p class="brand-kicker">Performance Engineering</p>
+            <h1>Results Preparation</h1>
+            <p class="brand-tag">
+              Collate Tuxedo stats after the load test. Keep PreChecks open in the other window.
+            </p>
+          </div>
+        </div>
+        <div class="header-meta">
+          <a class="window-link" href="/" target="v21-prechecks">PreChecks window</a>
+        </div>
+      </header>
+
+      <main class="container results-shell">
+        <section class="panel results-card">
+          <div class="results-card-head">
+            <h2>Collate results</h2>
+            <p class="panel-sub">
+              Enter the test window. The portal collects stats for every server, downloads the
+              report, then builds one online report and one API report from the totals column.
+            </p>
+          </div>
+
+          <form id="collate-form" class="results-form">
+            <label class="results-field">
+              <span>Test date</span>
+              <input id="test-date" name="date" type="date" required />
+            </label>
+            <label class="results-field">
+              <span>Start (24-hour)</span>
+              <input id="test-from" name="from" type="time" required />
+            </label>
+            <label class="results-field">
+              <span>End (24-hour)</span>
+              <input id="test-until" name="until" type="time" required />
+            </label>
+            <button id="collate-btn" class="primary" type="submit">Collate</button>
+          </form>
+          <p class="results-hint">9:16 AM is 09:16. 2:00 PM is 14:00. Collection can take a couple of minutes.</p>
+          <div id="collate-feedback" class="feedback" role="status"></div>
+          <div id="collate-output"></div>
+        </section>
+      </main>
+    </div>
+    <script src="./results.js"></script>
+  </body>
+</html>

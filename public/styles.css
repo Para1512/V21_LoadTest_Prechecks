@@ -1355,3 +1355,125 @@ button:disabled {
     width: 100%;
   }
 }
+
+a.window-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  text-decoration: none;
+  color: #042f2e;
+  background: linear-gradient(180deg, #5eead4 0%, #14b8a6 100%);
+  border: 1px solid #0d9488;
+}
+
+a.window-link:hover {
+  background: linear-gradient(180deg, #99f6e4 0%, #2dd4bf 100%);
+  color: #042f2e;
+}
+
+.results-shell {
+  max-width: 1100px;
+}
+
+.results-card-head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.results-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 16px;
+}
+
+.results-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.results-field input {
+  min-width: 160px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  font-family: var(--font);
+  background: var(--bg-0);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+
+.results-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
+}
+
+.results-hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.feedback-running {
+  color: #fdba74;
+}
+
+.feedback-ok {
+  color: var(--success);
+}
+
+.feedback-error {
+  color: #fecaca;
+}
+
+.results-summary {
+  margin: 8px 0 4px;
+  font-weight: 650;
+}
+
+.results-note,
+.results-hosts,
+.results-empty {
+  margin: 6px 0 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.results-report {
+  margin-top: 18px;
+}
+
+.results-report h3 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.results-table {
+  text-align: left;
+}
+
+.results-table td,
+.results-table th {
+  text-align: left;
+}
+
+.results-service {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+}

@@ -27,6 +27,7 @@ from tasks.reqcentral_status import check_reqcentral_issue
 from tasks.pet_health import PET_HEALTH_URL, run_pet_health_check
 from tasks.server_log_space import run_server_log_space_check
 from tasks.env_loader import load_project_env
+from tasks.tuxedo_stats_collate import CollateError, collect_and_collate
 
 BASE_DIR = Path(__file__).resolve().parent
 _ENV_BOOT = load_project_env(create_from_example=True)
@@ -649,6 +650,16 @@ def task_server_health():
         )
 
 
+@app.route("/api/results/collate", methods=["POST"])
+def results_collate():
+    try:
+        return jsonify(collect_and_collate(request.get_json(silent=True) or {}))
+    except CollateError as exc:
+        return jsonify({"success": False, "message": str(exc)}), exc.status_code
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc) or "Collate failed."}), 500
+
+
 @app.route("/api/tasks/trigger-sanity/run", methods=["POST"])
 def task_trigger_sanity():
     output = simulate_task_run("Trigger Sanity", "Run post-actions sanity validation.")
@@ -671,6 +682,11 @@ def jira_issue_status():
 @app.route("/", methods=["GET"])
 def index():
     return send_file(PUBLIC_DIR / "index.html")
+
+
+@app.route("/results", methods=["GET"])
+def results_page():
+    return send_file(PUBLIC_DIR / "results.html")
 
 
 @app.route("/<path:subpath>", methods=["GET"])

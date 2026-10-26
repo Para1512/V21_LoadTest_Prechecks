@@ -14,6 +14,7 @@ const ROOT = path.join(__dirname);
 let serverProcess = null;
 let mainWindow = null;
 let backendPort = null;
+const extraWindows = new Map();
 
 function getPort() {
   const p = parseInt(String(process.env.PORT || "3000").trim(), 10);
@@ -79,19 +80,65 @@ function startBackend() {
   });
 }
 
-function createWindow(port) {
-  mainWindow = new BrowserWindow({
+function portalWindowOptions(title) {
+  return {
     width: 1280,
     height: 840,
     minWidth: 900,
     minHeight: 600,
-    title: "V21 PreChecks Portal",
+    title,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true
     }
-  });
+  };
+}
 
+function isLocalPortalUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const port = String(backendPort);
+    const localHost = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    return localHost && parsed.port === port && (parsed.protocol === "http:" || parsed.protocol === "https:");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function attachWindowOpenHandler(win) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isLocalPortalUrl(url)) return { action: "deny" };
+    openPortalWindow(url);
+    return { action: "deny" };
+  });
+}
+
+function openPortalWindow(url) {
+  const parsed = new URL(url);
+  const pathName = parsed.pathname || "/";
+  if (pathName === "/" && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    return;
+  }
+  const key = `${parsed.origin}${pathName}`;
+  const existing = extraWindows.get(key);
+  if (existing && !existing.isDestroyed()) {
+    existing.focus();
+    return;
+  }
+  const title = pathName === "/results" ? "V21 Results Preparation" : "V21 PreChecks Portal";
+  const win = new BrowserWindow(portalWindowOptions(title));
+  attachWindowOpenHandler(win);
+  win.loadURL(url);
+  extraWindows.set(key, win);
+  win.on("closed", () => {
+    extraWindows.delete(key);
+  });
+}
+
+function createWindow(port) {
+  mainWindow = new BrowserWindow(portalWindowOptions("V21 PreChecks Portal"));
+  attachWindowOpenHandler(mainWindow);
   mainWindow.loadURL(`http://127.0.0.1:${port}/`);
 
   mainWindow.on("closed", () => {
