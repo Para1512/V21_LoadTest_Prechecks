@@ -3,13 +3,15 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const nodemailer = require("nodemailer");
+const { randomUUID } = require("crypto");
 const { execFile, exec } = require("child_process");
 const { runServerLogSpaceCheck } = require("./lib/taskServerLogSpace");
 const { runPetHealthCheck, PET_HEALTH_URL } = require("./lib/taskPetHealth");
 const { checkReqcentralIssue } = require("./lib/reqcentralStatus");
-const { collectAndCollate } = require("./lib/tuxedoStatsCollate");
+const { collectAndCollate, compareAbnormalServices } = require("./lib/tuxedoStatsCollate");
 
 const app = express();
+const resultReports = new Map();
 
 function parsePort(value, fallback) {
   const n = parseInt(String(value ?? "").trim(), 10);
@@ -456,12 +458,45 @@ app.post("/api/tasks/server-health-check/run", async (_req, res) => {
 
 app.post("/api/results/collate", async (req, res) => {
   try {
-    const payload = await collectAndCollate(req.body || {});
-    res.json(payload);
+    const { state, payload } = await collectAndCollate(req.body || {});
+    const reportId = randomUUID();
+    resultReports.set(reportId, { ...state, createdAt: Date.now() });
+    res.json({ ...payload, reportId });
   } catch (error) {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || "Collate failed."
+    });
+  }
+});
+
+app.get("/api/results/:reportId/raw", (req, res) => {
+  const report = resultReports.get(req.params.reportId);
+  if (!report) {
+    res.status(404).json({ success: false, message: "The report session has expired. Run Collate again." });
+    return;
+  }
+  const filename = report.file || `tuxedo_stats_${report.window.date}_${report.window.from.replace(":", "")}.out`;
+  res.type("text/plain");
+  if (req.query.download !== "0") {
+    res.attachment(filename);
+  }
+  res.send(report.rawReport);
+});
+
+app.post("/api/results/:reportId/compare", async (req, res) => {
+  const report = resultReports.get(req.params.reportId);
+  if (!report) {
+    res.status(404).json({ success: false, message: "The report session has expired. Run Collate again." });
+    return;
+  }
+  try {
+    const payload = await compareAbnormalServices(report, req.body?.minutes);
+    res.json({ ...payload, reportId: req.params.reportId });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || "Response-time comparison failed."
     });
   }
 });

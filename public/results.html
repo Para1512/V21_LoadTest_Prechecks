@@ -46,16 +46,16 @@
               <input id="test-date" name="date" type="date" required />
             </label>
             <label class="results-field">
-              <span>Start (24-hour)</span>
-              <input id="test-from" name="from" type="time" required />
+              <span>Start time</span>
+              <input id="test-from" name="from" type="time" step="60" required />
             </label>
             <label class="results-field">
-              <span>End (24-hour)</span>
-              <input id="test-until" name="until" type="time" required />
+              <span>End time</span>
+              <input id="test-until" name="until" type="time" step="60" required />
             </label>
             <button id="collate-btn" class="primary" type="submit">Collate</button>
           </form>
-          <p class="results-hint">9:16 AM is 09:16. 2:00 PM is 14:00. Collection can take a couple of minutes.</p>
+          <p class="results-hint">Use the clock picker to select the test times. Collection can take a couple of minutes.</p>
           <div id="collate-feedback" class="feedback" role="status"></div>
           <div id="collate-output"></div>
         </section>
