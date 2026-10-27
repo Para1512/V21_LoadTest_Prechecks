@@ -27,7 +27,7 @@ load_project_env(create_from_example=True)
 from tasks import oracle_queries as oq
 from tasks import vts_client as vts
 
-VTS1_URL = os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2244/").strip()
+VTS1_URL = os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2246/").strip()
 VTS2_URL = os.environ.get("VTS2_URL", "http://vm0196ptlrg001:2245/").strip()
 
 
@@ -67,7 +67,7 @@ def main() -> int:
             return 1
         if args.clear:
             for url, label in (
-                (os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2244/"), "VTS 1"),
+                (os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2246/"), "VTS 1"),
                 (os.environ.get("VTS2_URL", "http://vm0196ptlrg001:2245/"), "VTS 2"),
             ):
                 vts.clear_column(url.strip(), "P_SIM")

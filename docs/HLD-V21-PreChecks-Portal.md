@@ -38,7 +38,7 @@ It checks that test data, disks, logs, and servers are ready — and sends the r
 
 **Systems involved**
 
-- **VTS 1** — port 2244  
+- **VTS 1** — port 2246  
 - **VTS 2** — port 2245  
 - **Oracle** — when VTS 1 needs fresh data  
 

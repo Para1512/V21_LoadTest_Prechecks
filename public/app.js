@@ -859,7 +859,7 @@ function openTask1LogsModal(od) {
     preHdr.textContent = "Pre-check counts";
     panel.appendChild(preHdr);
     if (od.precheck.vts1) {
-      panel.appendChild(renderVtsCountTable("VTS 1 (port 2244)", od.precheck.vts1));
+      panel.appendChild(renderVtsCountTable("VTS 1 (port 2246)", od.precheck.vts1));
     }
     if (od.precheck.vts2) {
       panel.appendChild(renderVtsCountTable("VTS 2 (port 2245)", od.precheck.vts2));
