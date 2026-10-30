@@ -15,8 +15,8 @@ from tasks import oracle_extract as ora
 from tasks import oracle_queries as oq
 from tasks import vts_client as vts
 
-VTS1_URL = os.environ.get("VTS1_URL", "http://vm0196ptlrg001:2246/").strip()
-VTS2_URL = os.environ.get("VTS2_URL", "http://vm0196ptlrg001:2245/").strip()
+VTS1_URL = os.environ.get("VTS1_URL", "http://vwrenbptlrgap06:2244/").strip()
+VTS2_URL = os.environ.get("VTS2_URL", "http://vwrenbptlrgap06:2245/").strip()
 
 VTS1_CLEAR_COLUMNS_STEP1 = list(vts.VTS1_CLEAR_COLUMNS)
 VTS2_CLEAR_COLUMNS_STEP1 = list(vts.VTS2_CLEAR_COLUMNS)
