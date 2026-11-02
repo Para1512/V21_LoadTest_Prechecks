@@ -154,7 +154,7 @@ async function compareResponseTimes(minutes) {
     setFeedback(
       lastComparison.updates.length
         ? `Updated ${lastComparison.updates.length} abnormal response time(s) using the first ${minutes} minutes. Total calls were kept from the original test window.`
-        : `The first ${minutes} minutes still showed those services at 10 seconds or more, so the NPE averages were kept.`,
+        : `The first ${minutes} minutes still showed those services above 10 seconds, so the NPE averages were kept.`,
       "ok"
     );
   } catch (error) {
@@ -220,7 +220,7 @@ function renderAbnormalResponseTimes(payload) {
   section.appendChild(title);
   const note = document.createElement("p");
   note.className = "results-note";
-  note.textContent = `${payload.abnormal.length} service response time(s) are above ${payload.abnormalThreshold} seconds. Compare the same server and service from the start of the test. A value under ${payload.abnormalThreshold} seconds replaces the average. Total calls stay from the full NPE report.`;
+  note.textContent = `${payload.abnormal.length} service response time(s) are above ${payload.abnormalThreshold} seconds. Compare the same server and service from the start of the test. A value at or below ${payload.abnormalThreshold} seconds replaces the average. Total calls stay from the full NPE report.`;
   section.appendChild(note);
 
   const list = document.createElement("ul");

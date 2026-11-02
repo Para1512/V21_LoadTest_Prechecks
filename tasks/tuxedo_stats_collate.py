@@ -419,7 +419,7 @@ def compare_abnormal_services(state: dict, duration_minutes) -> dict:
     updates = []
     for candidate in abnormal_before:
         replacement = by_key.get(f"{candidate['host']}|{candidate['service']}")
-        if not replacement or replacement["avg"] >= ABNORMAL_RESPONSE_SECONDS:
+        if not replacement or replacement["avg"] > ABNORMAL_RESPONSE_SECONDS:
             continue
         original_block = next(block for block in state["blocks"] if block["host"] == candidate["host"])
         original_service = next(
