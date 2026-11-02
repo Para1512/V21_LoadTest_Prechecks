@@ -282,26 +282,10 @@ function renderResult(payload) {
   if (abnormalReview) output.appendChild(abnormalReview);
   output.appendChild(renderActions(payload));
 
-  if (payload.comparisons?.length) {
-    const updateSummary = document.createElement("p");
-    updateSummary.className = "results-note";
-    const updates = payload.comparisons.flatMap((comparison) => comparison.updates || []);
-    updateSummary.textContent = updates.length
-      ? `Adjusted averages: ${updates.map((item) => `${item.host}/${item.service} ${item.from}s → ${item.to}s`).join("; ")}.`
-      : "Comparison completed; no reported average was replaced.";
-    output.appendChild(updateSummary);
-  } else if (!payload.corrections || payload.corrections.length === 0) {
+  if (!payload.comparisons?.length && (!payload.corrections || payload.corrections.length === 0)) {
     const note = document.createElement("p");
     note.className = "results-note";
-    note.textContent =
-      "PET Enhanced averages currently match the NPE totals column.";
-    output.appendChild(note);
-  } else {
-    const note = document.createElement("p");
-    note.className = "results-note";
-    note.textContent = `Corrected ${payload.corrections.length} response time${
-      payload.corrections.length === 1 ? "" : "s"
-    } before combining.`;
+    note.textContent = "PET Enhanced averages currently match the NPE totals column.";
     output.appendChild(note);
   }
 

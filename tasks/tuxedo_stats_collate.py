@@ -411,32 +411,43 @@ def compare_abnormal_services(state: dict, duration_minutes) -> dict:
         raise CollateError("The comparison period cannot be longer than the original test window.")
 
     comparison_report = _collect_report(compare_window)
-    by_key = {
-        f"{block['host']}|{service['service']}": service
-        for block in comparison_report["parsed"]["blocks"]
-        for service in block["services"]
-    }
+    by_key = {}
+    for block in comparison_report["parsed"]["blocks"]:
+        for service in block["services"]:
+            key = f"{block['host']}|{service['service']}"
+            previous = by_key.get(key)
+            if previous is None or service["avg"] < previous["avg"]:
+                by_key[key] = service
     updates = []
-    for candidate in abnormal_before:
-        replacement = by_key.get(f"{candidate['host']}|{candidate['service']}")
-        if not replacement or replacement["avg"] > ABNORMAL_RESPONSE_SECONDS:
-            continue
-        original_block = next(block for block in state["blocks"] if block["host"] == candidate["host"])
-        original_service = next(
-            service for service in original_block["services"] if service["service"] == candidate["service"]
-        )
-        previous = original_service["avg"]
-        original_service["avg"] = replacement["avg"]
-        original_service["corrected"] = True
-        updates.append(
-            {
-                "host": candidate["host"],
-                "service": candidate["service"],
-                "from": _format_avg(previous),
-                "to": _format_avg(replacement["avg"]),
-                "totalCalls": original_service["calls"],
-            }
-        )
+    seen = set()
+    for block in state["blocks"]:
+        for original_service in block["services"]:
+            if original_service["avg"] <= ABNORMAL_RESPONSE_SECONDS:
+                continue
+            key = f"{block['host']}|{original_service['service']}"
+            replacement = by_key.get(key)
+            if (
+                not replacement
+                or replacement["avg"] >= original_service["avg"]
+                or replacement["avg"] > ABNORMAL_RESPONSE_SECONDS
+            ):
+                continue
+            previous = original_service["avg"]
+            calls = original_service["calls"]
+            original_service["avg"] = replacement["avg"]
+            original_service["corrected"] = True
+            if key in seen:
+                continue
+            seen.add(key)
+            updates.append(
+                {
+                    "host": block["host"],
+                    "service": original_service["service"],
+                    "from": _format_avg(previous),
+                    "to": _format_avg(replacement["avg"]),
+                    "totalCalls": calls,
+                }
+            )
     state["comparisons"].append(
         {
             "minutes": minutes,
