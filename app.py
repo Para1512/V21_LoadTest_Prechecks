@@ -687,7 +687,7 @@ def results_compare(report_id: str):
         return jsonify({"success": False, "message": "The report session has expired. Run Collate again."}), 404
     try:
         body = request.get_json(silent=True) or {}
-        payload = compare_abnormal_services(report, body.get("minutes"))
+        payload = compare_abnormal_services(report, body)
         payload["reportId"] = report_id
         return jsonify(payload)
     except CollateError as exc:

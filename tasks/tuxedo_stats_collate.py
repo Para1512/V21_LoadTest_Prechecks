@@ -1,4 +1,4 @@
-"""Collect Tuxedo IO stats and combine online vs API servers."""
+"""Collect Tuxedo IO stats, correct abnormal response times, and build Online/API reports."""
 
 from __future__ import annotations
 
@@ -13,20 +13,28 @@ REPORT_URL = (
     os.environ.get("TUX_IO_REPORT_URL") or "http://npe-services:8888/cgi-bin/TUX_IO_REPORT.py"
 ).strip()
 REQUEST_TIMEOUT_S = int(os.environ.get("TUX_IO_REPORT_TIMEOUT_MS") or "180000") / 1000
-
-ONLINE_HOSTS = ("VLRENBPTCOLAP01", "VLRENBPTCOLAP02")
-API_HOSTS = tuple(f"VLRENBPTTUXAP{index:02d}" for index in range(1, 11))
 ABNORMAL_RESPONSE_SECONDS = float(os.environ.get("TUX_IO_ABNORMAL_RESPONSE_SECONDS") or "10")
 
-# Replace a service TOTALS average before servers are combined.
-# {"service": "csSvApiBan00", "avg": 0.10, "host": "VLRENBPTTUXAP01"}
-RESPONSE_TIME_CORRECTIONS: list[dict] = []
+ONLINE_SERVERS = (
+    {"host": "VLRENBPTCOLAP01", "login": "petole1a@VLRENBPTCOLAP01"},
+    {"host": "VLRENBPTCOLAP02", "login": "petole2a@VLRENBPTCOLAP02"},
+)
+API_SERVERS = tuple(
+    {"host": f"VLRENBPTTUXAP{index:02d}", "login": f"petapia@VLRENBPTTUXAP{index:02d}"}
+    for index in range(1, 11)
+)
+ONLINE_HOSTS = tuple(server["host"] for server in ONLINE_SERVERS)
+API_HOSTS = tuple(server["host"] for server in API_SERVERS)
+LOGIN_BY_HOST = {server["host"]: server["login"] for server in ONLINE_SERVERS + API_SERVERS}
+COMPARISON_PRESETS = (50, 40, 30)
 
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
-_HOST_RE = re.compile(r"oper@([A-Za-z0-9]+)", re.IGNORECASE)
+_KNOWN_HOST_RE = re.compile(r"\b(VLRENBPT(?:COLAP|TUXAP)\d{2})\b", re.IGNORECASE)
+_GENERIC_HOST_RE = re.compile(r"\b[A-Za-z0-9_.-]+@([A-Za-z0-9]+)")
 _METRIC_RE = re.compile(r"^(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)$")
 _SERVICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_HEADER_WORDS = {"SVCNAME", "TOTALS", "NUM"}
 _FILE_RE = re.compile(r"report_\d{8}_\d{6}\.out")
 _SAFE_FILE_RE = re.compile(r"^report_[A-Za-z0-9._-]+\.out$")
 
@@ -37,7 +45,7 @@ class CollateError(Exception):
         self.status_code = status_code
 
 
-def _normalize_time(value: str | None) -> str | None:
+def _normalize_time(value) -> str | None:
     match = _TIME_RE.match(str(value or "").strip())
     if not match:
         return None
@@ -48,7 +56,7 @@ def _normalize_time(value: str | None) -> str | None:
     return f"{hours:02d}:{minutes:02d}"
 
 
-def _normalize_date(value: str | None) -> str | None:
+def _normalize_date(value) -> str | None:
     match = _DATE_RE.match(str(value or "").strip())
     if not match:
         return None
@@ -59,6 +67,14 @@ def _normalize_date(value: str | None) -> str | None:
     return match.group(0)
 
 
+def _minutes_of_day(hhmm: str) -> int:
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def _time_of_day(total_minutes: int) -> str:
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
 def normalize_collate_input(body: dict | None) -> dict:
     payload = body or {}
     date = _normalize_date(payload.get("date"))
@@ -67,20 +83,18 @@ def normalize_collate_input(body: dict | None) -> dict:
     if not date:
         raise CollateError("Enter the test date as YYYY-MM-DD.")
     if not start or not end:
-        raise CollateError("Enter start and end times as 24-hour HH:MM. 9:16 AM is 09:16.")
-    start_minutes = int(start[:2]) * 60 + int(start[3:])
-    end_minutes = int(end[:2]) * 60 + int(end[3:])
-    if end_minutes <= start_minutes:
+        raise CollateError("Enter the test start and end times.")
+    if _minutes_of_day(end) <= _minutes_of_day(start):
         raise CollateError("End time must be later than start time on the same date.")
     return {"date": date, "from": start, "until": end}
 
 
-def _round2(value: float) -> float:
-    return round(float(value) + 1e-12, 2)
-
-
 def _format_avg(value: float) -> str:
-    return f"{_round2(value):.2f}"
+    return f"{round(float(value) + 1e-12, 2):.2f}"
+
+
+def _format_calls(value: float):
+    return int(value) if float(value).is_integer() else value
 
 
 def _parse_metric(token: str) -> tuple[float, float] | None:
@@ -90,157 +104,107 @@ def _parse_metric(token: str) -> tuple[float, float] | None:
     return float(match.group(1)), float(match.group(2))
 
 
-def _correction_for(host: str, service: str) -> dict | None:
-    for rule in RESPONSE_TIME_CORRECTIONS:
-        if rule.get("service") != service:
-            continue
-        rule_host = rule.get("host")
-        if rule_host and rule_host != host:
-            continue
-        return rule
-    return None
-
-
-def _parse_block(block_text: str) -> dict | None:
-    lines = block_text.split("\n")
-    host_line = next((line for line in lines if line.strip().lower().startswith("oper@")), "")
-    host_match = _HOST_RE.search(host_line)
-    if not host_match:
+def _parse_service_line(line: str) -> dict | None:
+    tokens = line.split()
+    if len(tokens) < 2:
         return None
-    host = host_match.group(1).upper()
-    start_after = ""
-    end_before = ""
-    services = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or set(line.replace(" ", "")) <= {"-"}:
-            continue
-        if line.upper().startswith("START AFTER:"):
-            start_after = line.split(":", 1)[1].strip()
-            continue
-        if line.upper().startswith("END BEFORE:"):
-            end_before = line.split(":", 1)[1].strip()
-            continue
-        tokens = line.split()
-        if len(tokens) < 2 or not _SERVICE_RE.match(tokens[0]):
-            continue
-        if tokens[0].upper() in {"SVCNAME", "TOTALS", "NUM"}:
-            continue
-        metrics = [_parse_metric(token) for token in tokens[1:]]
-        if any(metric is None for metric in metrics):
-            continue
-        calls, avg = metrics[-1]
-        rule = _correction_for(host, tokens[0])
-        services.append(
-            {
-                "service": tokens[0],
-                "calls": calls,
-                "avg": float(rule["avg"]) if rule else avg,
-                "reportedAvg": avg,
-                "corrected": rule is not None,
-            }
-        )
-    return {
-        "host": host,
-        "startAfter": start_after,
-        "endBefore": end_before,
-        "services": services,
-    }
+    service, metrics = tokens[0], tokens[1:]
+    if not _SERVICE_RE.match(service) or service.upper() in _HEADER_WORDS:
+        return None
+    totals = _parse_metric(metrics[-1])
+    if not totals:
+        return None
+    if not all(_parse_metric(token) or re.fullmatch(r"-+", token) for token in metrics[:-1]):
+        return None
+    return {"service": service, "calls": totals[0], "avg": totals[1]}
+
+
+def _host_from_line(line: str) -> str | None:
+    known = _KNOWN_HOST_RE.search(line)
+    if known:
+        return known.group(1).upper()
+    generic = _GENERIC_HOST_RE.search(line)
+    return generic.group(1).upper() if generic else None
 
 
 def parse_tuxedo_report(text: str) -> dict:
-    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    blocks = []
-    notes = []
-    seen: dict[str, dict] = {}
-    for part in re.split(r"\n(?=oper@)", normalized, flags=re.IGNORECASE):
-        block = _parse_block(part)
-        if not block:
+    by_host: dict[str, dict] = {}
+    current = None
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
             continue
-        if block["host"] in seen:
-            notes.append(f"Duplicate block for {block['host']}; the later block was used.")
-        seen[block["host"]] = block
-        blocks.append(block)
-    return {"blocks": list(seen.values()), "notes": notes}
-
-
-def _combine_services(blocks: list[dict]) -> dict:
-    totals: dict[str, dict] = {}
-    corrections = []
-    for block in blocks:
-        for row in block["services"]:
-            if row["corrected"]:
-                corrections.append(
-                    {
-                        "host": block["host"],
-                        "service": row["service"],
-                        "reportedAvg": _format_avg(row["reportedAvg"]),
-                        "avg": _format_avg(row["avg"]),
-                    }
+        row = _parse_service_line(line)
+        if not row:
+            host = _host_from_line(line)
+            if host:
+                current = by_host.setdefault(
+                    host,
+                    {"host": host, "startAfter": "", "endBefore": "", "sections": 0, "services": {}},
                 )
-            current = totals.setdefault(row["service"], {"calls": 0.0, "weighted": 0.0})
-            current["calls"] += row["calls"]
-            current["weighted"] += row["calls"] * row["avg"]
-    rows = []
-    for service, current in totals.items():
-        avg = current["weighted"] / current["calls"] if current["calls"] else 0
-        rows.append(
+                current["sections"] += 1
+                continue
+        if current is None:
+            continue
+        if line.upper().startswith("START AFTER:"):
+            current["startAfter"] = current["startAfter"] or line.split(":", 1)[1].strip()
+            continue
+        if line.upper().startswith("END BEFORE:"):
+            current["endBefore"] = current["endBefore"] or line.split(":", 1)[1].strip()
+            continue
+        if not row:
+            continue
+        existing = current["services"].get(row["service"])
+        if existing:
+            existing["calls"] += row["calls"]
+            existing["weighted"] += row["calls"] * row["avg"]
+            existing["rows"] += 1
+        else:
+            current["services"][row["service"]] = {
+                "calls": row["calls"],
+                "weighted": row["calls"] * row["avg"],
+                "avg": row["avg"],
+                "rows": 1,
+            }
+
+    notes = []
+    blocks = []
+    for block in by_host.values():
+        if block["sections"] > 1:
+            notes.append(
+                f"{block['host']} appeared {block['sections']} times in the NPE report; its rows were combined."
+            )
+        services = []
+        for service, value in block["services"].items():
+            avg = value["avg"] if value["rows"] == 1 or not value["calls"] else value["weighted"] / value["calls"]
+            services.append(
+                {"service": service, "calls": value["calls"], "avg": avg, "reportedAvg": avg, "corrected": False}
+            )
+        blocks.append(
             {
-                "service": service,
-                "avgResponseTime": _format_avg(avg),
-                "totalCalls": int(current["calls"]) if current["calls"] == int(current["calls"]) else current["calls"],
+                "host": block["host"],
+                "startAfter": block["startAfter"],
+                "endBefore": block["endBefore"],
+                "services": services,
             }
         )
-    rows.sort(key=lambda row: (-row["totalCalls"], row["service"]))
-    return {"rows": rows, "corrections": corrections}
+    return {"blocks": blocks, "notes": notes}
 
 
-def _group_report(all_blocks: list[dict], hosts: tuple[str, ...], title: str) -> dict:
-    selected = []
-    found = []
-    for host in hosts:
-        block = next((item for item in all_blocks if item["host"] == host), None)
-        if not block:
-            continue
-        found.append(host)
-        selected.append(block)
-    missing = [host for host in hosts if host not in found]
-    combined = _combine_services(selected)
-    window = next((block for block in selected if block["startAfter"] or block["endBefore"]), {})
-    return {
-        "title": title,
-        "hosts": found,
-        "missing": missing,
-        "startAfter": window.get("startAfter", ""),
-        "endBefore": window.get("endBefore", ""),
-        "rows": combined["rows"],
-        "corrections": combined["corrections"],
-    }
-
-
-def collate_blocks(blocks: list[dict], notes: list[str] | None = None) -> dict:
-    known = set(ONLINE_HOSTS) | set(API_HOSTS)
-    online = _group_report(blocks, ONLINE_HOSTS, "Online report")
-    api = _group_report(blocks, API_HOSTS, "API report")
-    return {
-        "notes": notes or [],
-        "ignoredHosts": [block["host"] for block in blocks if block["host"] not in known],
-        "online": online,
-        "api": api,
-        "corrections": online["corrections"] + api["corrections"],
-    }
-
-
-def collate_parsed_report(text: str) -> dict:
-    parsed = parse_tuxedo_report(text)
-    return collate_blocks(parsed["blocks"], parsed["notes"])
+def _group_for_host(host: str) -> str | None:
+    if host in ONLINE_HOSTS:
+        return "Online"
+    if host in API_HOSTS:
+        return "API"
+    return None
 
 
 def find_abnormal_services(blocks: list[dict]) -> list[dict]:
-    known = set(ONLINE_HOSTS) | set(API_HOSTS)
+    order = {host: index for index, host in enumerate(ONLINE_HOSTS + API_HOSTS)}
     abnormal = []
     for block in blocks:
-        if block["host"] not in known:
+        group = _group_for_host(block["host"])
+        if not group:
             continue
         for row in block["services"]:
             if row["avg"] <= ABNORMAL_RESPONSE_SECONDS:
@@ -248,18 +212,65 @@ def find_abnormal_services(blocks: list[dict]) -> list[dict]:
             abnormal.append(
                 {
                     "host": block["host"],
-                    "group": "Online" if block["host"] in ONLINE_HOSTS else "API",
+                    "login": LOGIN_BY_HOST[block["host"]],
+                    "group": group,
                     "service": row["service"],
                     "avgResponseTime": _format_avg(row["avg"]),
-                    "totalCalls": row["calls"],
+                    "totalCalls": _format_calls(row["calls"]),
                 }
             )
-    abnormal.sort(key=lambda item: (-float(item["avgResponseTime"]), item["host"], item["service"]))
+    abnormal.sort(
+        key=lambda item: (order[item["host"]], -float(item["avgResponseTime"]), item["service"])
+    )
     return abnormal
 
 
+def _group_report(blocks: list[dict], servers: tuple[dict, ...], title: str, file_name: str) -> dict:
+    by_host = {block["host"]: block for block in blocks}
+    found = [server for server in servers if server["host"] in by_host]
+    missing = [server for server in servers if server["host"] not in by_host]
+    totals: dict[str, dict] = {}
+    for server in found:
+        for row in by_host[server["host"]]["services"]:
+            current = totals.setdefault(row["service"], {"calls": 0.0, "weighted": 0.0})
+            current["calls"] += row["calls"]
+            current["weighted"] += row["calls"] * row["avg"]
+    rows = [
+        {
+            "service": service,
+            "avgResponseTime": _format_avg(current["weighted"] / current["calls"] if current["calls"] else 0),
+            "totalCalls": _format_calls(current["calls"]),
+        }
+        for service, current in totals.items()
+    ]
+    rows.sort(key=lambda row: (-row["totalCalls"], row["service"]))
+    return {
+        "title": title,
+        "fileName": file_name,
+        "servers": [server["login"] for server in found],
+        "missing": [server["login"] for server in missing],
+        "rows": rows,
+    }
+
+
+def _report_text(report: dict, window: dict) -> str:
+    lines = [
+        f"PET Enhanced {report['title']}",
+        f"Test window: {window['date']} {window['from']} - {window['until']}",
+        f"Servers: {', '.join(report['servers']) if report['servers'] else 'none'}",
+    ]
+    if report["missing"]:
+        lines.append(f"Missing servers: {', '.join(report['missing'])}")
+    lines.extend(["", "Tuxedo service\tAvg response time\tTotal no of calls"])
+    for row in report["rows"]:
+        lines.append(f"{row['service']}\t{row['avgResponseTime']}\t{row['totalCalls']}")
+    return "\r\n".join(lines) + "\r\n"
+
+
 def _looks_like_report(text: str) -> bool:
-    return bool(re.search(r"oper@", text, re.IGNORECASE) and re.search(r"SERVICE SUMMARY REPORT", text, re.IGNORECASE))
+    return bool(
+        re.search(r"SERVICE SUMMARY REPORT", text, re.IGNORECASE) and _KNOWN_HOST_RE.search(text)
+    )
 
 
 def extract_report_filename(html: str) -> str | None:
@@ -305,15 +316,10 @@ def _fetch_text(url: str, params: dict | None = None) -> str:
     return response.text
 
 
-def _add_minutes(hhmm: str, minutes: int) -> str:
-    start = int(hhmm[:2]) * 60 + int(hhmm[3:])
-    end = start + minutes
-    if end > 24 * 60:
-        raise CollateError("The selected comparison period extends past midnight.")
-    return f"{end // 60:02d}:{end % 60:02d}"
-
-
-def _collect_report(window: dict) -> dict:
+def _collect_report(window: dict, log: list[str]) -> dict:
+    log.append(
+        f"Requesting Tuxedo stats from NPE services for {window['date']} {window['from']}–{window['until']}."
+    )
     collect_body = _fetch_text(
         REPORT_URL,
         {
@@ -332,6 +338,7 @@ def _collect_report(window: dict) -> dict:
                 "The stats page did not include a report file name. Check the date and times, then try again.",
                 502,
             )
+        log.append(f"NPE services created {file_name}. Downloading it.")
         report_text = _extract_report_text(
             _fetch_text(REPORT_URL, {"action": "download", "file": file_name})
         )
@@ -339,45 +346,57 @@ def _collect_report(window: dict) -> dict:
         report_text = _extract_report_text(collect_body)
     if not _looks_like_report(report_text):
         raise CollateError("The downloaded file is not a Tuxedo service summary report.", 502)
-    return {"file": file_name, "reportText": report_text, "parsed": parse_tuxedo_report(report_text)}
+    parsed = parse_tuxedo_report(report_text)
+    log.append(f"Read {len(parsed['blocks'])} server section(s) from the report.")
+    return {"file": file_name, "reportText": report_text, "parsed": parsed}
 
 
-def response_for_state(state: dict) -> dict:
-    collated = collate_blocks(state["blocks"], state["notes"])
+def _coverage_message(label: str, servers: tuple[dict, ...], blocks: list[dict]) -> str:
+    hosts = {block["host"] for block in blocks}
+    missing = [server["login"] for server in servers if server["host"] not in hosts]
+    found = len(servers) - len(missing)
+    if missing:
+        return f"{label} servers found: {found} of {len(servers)}. Missing: {', '.join(missing)}."
+    return f"{label} servers found: {found} of {len(servers)}."
+
+
+def response_for_state(state: dict, log: list[str] | None = None) -> dict:
+    online = _group_report(state["blocks"], ONLINE_SERVERS, "Online report", "oln_report.txt")
+    api = _group_report(state["blocks"], API_SERVERS, "API report", "api_report.txt")
+    online["text"] = _report_text(online, state["window"])
+    api["text"] = _report_text(api, state["window"])
+    window_hint = next(
+        (block for block in state["blocks"] if block["startAfter"] or block["endBefore"]), {}
+    )
+    start = _minutes_of_day(state["window"]["from"])
+    end = _minutes_of_day(state["window"]["until"])
+    known = set(ONLINE_HOSTS) | set(API_HOSTS)
     return {
         "success": True,
         "file": state["file"],
         "window": {
-            "date": state["window"]["date"],
-            "from": state["window"]["from"],
-            "until": state["window"]["until"],
-            "startAfter": collated["online"]["startAfter"] or collated["api"]["startAfter"],
-            "endBefore": collated["online"]["endBefore"] or collated["api"]["endBefore"],
+            **state["window"],
+            "startAfter": window_hint.get("startAfter", ""),
+            "endBefore": window_hint.get("endBefore", ""),
         },
-        "notes": collated["notes"],
-        "ignoredHosts": collated["ignoredHosts"],
-        "corrections": collated["corrections"],
-        "online": {
-            "title": collated["online"]["title"],
-            "hosts": collated["online"]["hosts"],
-            "missing": collated["online"]["missing"],
-            "rows": collated["online"]["rows"],
-        },
-        "api": {
-            "title": collated["api"]["title"],
-            "hosts": collated["api"]["hosts"],
-            "missing": collated["api"]["missing"],
-            "rows": collated["api"]["rows"],
-        },
-        "abnormal": find_abnormal_services(state["blocks"]),
+        "notes": state["notes"],
+        "ignoredHosts": [block["host"] for block in state["blocks"] if block["host"] not in known],
         "abnormalThreshold": ABNORMAL_RESPONSE_SECONDS,
+        "originalAbnormalCount": state["originalAbnormalCount"],
+        "abnormal": find_abnormal_services(state["blocks"]),
         "comparisons": state["comparisons"],
+        "presets": [
+            {"minutes": minutes, "available": start + minutes <= end} for minutes in COMPARISON_PRESETS
+        ],
+        "reports": {"online": online, "api": api},
+        "log": log or [],
     }
 
 
 def collect_and_collate(body: dict | None) -> tuple[dict, dict]:
     window = normalize_collate_input(body)
-    report = _collect_report(window)
+    log = [f"Test window: {window['date']} {window['from']}–{window['until']}."]
+    report = _collect_report(window, log)
     state = {
         "file": report["file"],
         "rawReport": report["reportText"],
@@ -385,75 +404,129 @@ def collect_and_collate(body: dict | None) -> tuple[dict, dict]:
         "notes": report["parsed"]["notes"],
         "window": window,
         "comparisons": [],
+        "originalAbnormalCount": 0,
     }
-    return state, response_for_state(state)
+    log.append(_coverage_message("Online", ONLINE_SERVERS, state["blocks"]))
+    log.append(_coverage_message("API", API_SERVERS, state["blocks"]))
+    abnormal = find_abnormal_services(state["blocks"])
+    state["originalAbnormalCount"] = len(abnormal)
+    if abnormal:
+        servers = len({item["host"] for item in abnormal})
+        log.append(
+            f"Found {len(abnormal)} abnormal response time(s) above {ABNORMAL_RESPONSE_SECONDS:g} sec "
+            f"on {servers} server(s). Choose a comparison window to correct them."
+        )
+    else:
+        log.append(
+            f"No response times are above {ABNORMAL_RESPONSE_SECONDS:g} sec. PET Enhanced reports are ready."
+        )
+    return state, response_for_state(state, log)
 
 
-def compare_abnormal_services(state: dict, duration_minutes) -> dict:
-    try:
-        minutes = int(duration_minutes)
-    except (TypeError, ValueError):
-        minutes = 0
-    if minutes < 1 or str(duration_minutes).strip() != str(minutes):
-        raise CollateError("Enter a whole number of minutes for the comparison.")
+def _comparison_window(test_window: dict, body: dict) -> dict:
+    start = _minutes_of_day(test_window["from"])
+    end = _minutes_of_day(test_window["until"])
+    raw_minutes = body.get("minutes")
+    if raw_minutes not in (None, ""):
+        try:
+            minutes = int(raw_minutes)
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes < 1 or str(raw_minutes).strip() != str(minutes):
+            raise CollateError("Choose a whole number of minutes for the comparison.")
+        if start + minutes > end:
+            raise CollateError(
+                f"The test window is {end - start} minutes, so the first {minutes} minutes cannot be compared."
+            )
+        return {
+            "date": test_window["date"],
+            "from": test_window["from"],
+            "until": _time_of_day(start + minutes),
+            "label": f"first {minutes} min",
+        }
+    range_from = _normalize_time(body.get("from"))
+    range_until = _normalize_time(body.get("until"))
+    if not range_from or not range_until:
+        raise CollateError("Choose a start and end time for the custom comparison range.")
+    if _minutes_of_day(range_until) <= _minutes_of_day(range_from):
+        raise CollateError("The custom range end time must be later than its start time.")
+    if _minutes_of_day(range_from) < start or _minutes_of_day(range_until) > end:
+        raise CollateError(
+            f"The custom range must be inside the test window {test_window['from']}–{test_window['until']}."
+        )
+    return {
+        "date": test_window["date"],
+        "from": range_from,
+        "until": range_until,
+        "label": f"custom {range_from}–{range_until}",
+    }
+
+
+def compare_abnormal_services(state: dict, body: dict | None) -> dict:
+    window = _comparison_window(state["window"], body or {})
+    log = [f"Comparison window: {window['label']} ({window['date']} {window['from']}–{window['until']})."]
     abnormal_before = find_abnormal_services(state["blocks"])
     if not abnormal_before:
-        return response_for_state(state)
+        log.append(
+            f"No response times are above {ABNORMAL_RESPONSE_SECONDS:g} sec, so nothing needed to be compared."
+        )
+        return response_for_state(state, log)
+    log.append(
+        f"Checking {len(abnormal_before)} abnormal response time(s) against the same server and service."
+    )
 
-    compare_window = {
-        "date": state["window"]["date"],
-        "from": state["window"]["from"],
-        "until": _add_minutes(state["window"]["from"], minutes),
+    comparison = _collect_report(window, log)
+    lookup = {
+        f"{block['host']}|{row['service']}": row
+        for block in comparison["parsed"]["blocks"]
+        for row in block["services"]
     }
-    original_end = int(state["window"]["until"][:2]) * 60 + int(state["window"]["until"][3:])
-    compare_end = int(compare_window["until"][:2]) * 60 + int(compare_window["until"][3:])
-    if compare_end > original_end:
-        raise CollateError("The comparison period cannot be longer than the original test window.")
 
-    comparison_report = _collect_report(compare_window)
-    by_key = {}
-    for block in comparison_report["parsed"]["blocks"]:
-        for service in block["services"]:
-            key = f"{block['host']}|{service['service']}"
-            previous = by_key.get(key)
-            if previous is None or service["avg"] < previous["avg"]:
-                by_key[key] = service
-    updates = []
-    seen = set()
+    corrected = still_high = not_found = 0
     for block in state["blocks"]:
-        for original_service in block["services"]:
-            if original_service["avg"] <= ABNORMAL_RESPONSE_SECONDS:
+        if not _group_for_host(block["host"]):
+            continue
+        for row in block["services"]:
+            if row["avg"] <= ABNORMAL_RESPONSE_SECONDS:
                 continue
-            key = f"{block['host']}|{original_service['service']}"
-            replacement = by_key.get(key)
-            if (
-                not replacement
-                or replacement["avg"] >= original_service["avg"]
-                or replacement["avg"] > ABNORMAL_RESPONSE_SECONDS
-            ):
+            replacement = lookup.get(f"{block['host']}|{row['service']}")
+            if not replacement:
+                not_found += 1
                 continue
-            previous = original_service["avg"]
-            calls = original_service["calls"]
-            original_service["avg"] = replacement["avg"]
-            original_service["corrected"] = True
-            if key in seen:
+            if replacement["avg"] > ABNORMAL_RESPONSE_SECONDS:
+                still_high += 1
                 continue
-            seen.add(key)
-            updates.append(
-                {
-                    "host": block["host"],
-                    "service": original_service["service"],
-                    "from": _format_avg(previous),
-                    "to": _format_avg(replacement["avg"]),
-                    "totalCalls": calls,
-                }
-            )
+            row["avg"] = replacement["avg"]
+            row["corrected"] = True
+            row["correctedBy"] = window["label"]
+            corrected += 1
+
+    log.append(
+        f"Updated {corrected} response time(s) using the {window['label']} report. "
+        "Total calls were kept from the full test report."
+    )
+    if still_high:
+        log.append(
+            f"{still_high} response time(s) were still above {ABNORMAL_RESPONSE_SECONDS:g} sec in the "
+            f"{window['label']} report and were kept unchanged."
+        )
+    if not_found:
+        log.append(
+            f"{not_found} service(s) had no calls on the same server in the {window['label']} report "
+            "and were kept unchanged."
+        )
+    log.append("Recalculated the Online report (oln_report.txt) and API report (api_report.txt).")
+
     state["comparisons"].append(
         {
-            "minutes": minutes,
-            "file": comparison_report["file"],
-            "compared": len(abnormal_before),
-            "updates": updates,
+            "label": window["label"],
+            "from": window["from"],
+            "until": window["until"],
+            "file": comparison["file"],
+            "checked": len(abnormal_before),
+            "corrected": corrected,
+            "stillHigh": still_high,
+            "notFound": not_found,
         }
     )
-    return response_for_state(state)
+    return response_for_state(state, log)

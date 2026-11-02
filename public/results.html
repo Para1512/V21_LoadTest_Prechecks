@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body class="theme-results">
     <div class="app-shell">
       <header class="app-header">
         <div class="brand-block">
@@ -35,8 +35,9 @@
           <div class="results-card-head">
             <h2>Collate results</h2>
             <p class="panel-sub">
-              Enter the test window. The portal collects stats for every server, downloads the
-              report, then builds one online report and one API report from the totals column.
+              Enter the test window. The portal collects the NPE report, lists any response times
+              above 10 sec for each server so you can correct them, then builds the PET Enhanced
+              online report (oln_report.txt) and API report (api_report.txt).
             </p>
           </div>
 
@@ -57,6 +58,13 @@
           </form>
           <p class="results-hint">Use the clock picker to select the test times. Collection can take a couple of minutes.</p>
           <div id="collate-feedback" class="feedback" role="status"></div>
+          <section id="process-log" class="process-log" hidden>
+            <div class="process-log-head">
+              <h3>Processing</h3>
+              <span id="process-elapsed" class="process-elapsed"></span>
+            </div>
+            <ol id="process-log-list" class="process-log-list"></ol>
+          </section>
           <div id="collate-output"></div>
         </section>
       </main>

@@ -491,7 +491,7 @@ app.post("/api/results/:reportId/compare", async (req, res) => {
     return;
   }
   try {
-    const payload = await compareAbnormalServices(report, req.body?.minutes);
+    const payload = await compareAbnormalServices(report, req.body || {});
     res.json({ ...payload, reportId: req.params.reportId });
   } catch (error) {
     res.status(error.statusCode || 500).json({
