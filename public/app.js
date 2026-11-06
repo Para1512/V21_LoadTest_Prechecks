@@ -859,10 +859,14 @@ function openTask1LogsModal(od) {
     preHdr.textContent = "Pre-check counts";
     panel.appendChild(preHdr);
     if (od.precheck.vts1) {
-      panel.appendChild(renderVtsCountTable("VTS 1 (port 2244)", od.precheck.vts1));
+      panel.appendChild(
+        renderVtsCountTable(od.precheck.vts1.url || "VTS 1 (port 2244)", od.precheck.vts1)
+      );
     }
     if (od.precheck.vts2) {
-      panel.appendChild(renderVtsCountTable("VTS 2 (port 2245)", od.precheck.vts2));
+      panel.appendChild(
+        renderVtsCountTable(od.precheck.vts2.url || "VTS 2 (port 2245)", od.precheck.vts2)
+      );
     }
   }
 
@@ -873,12 +877,18 @@ function openTask1LogsModal(od) {
     panel.appendChild(dataHdr);
     if (prep.dataDetails.vts1) {
       panel.appendChild(
-        renderVtsCountsTable(prep.dataDetails.vts1.label || "VTS 1", prep.dataDetails.vts1.counts)
+        renderVtsCountsTable(
+          prep.dataDetails.vts1.url || prep.dataDetails.vts1.label || "VTS 1",
+          prep.dataDetails.vts1.counts
+        )
       );
     }
     if (prep.dataDetails.vts2) {
       panel.appendChild(
-        renderVtsCountsTable(prep.dataDetails.vts2.label || "VTS 2", prep.dataDetails.vts2.counts)
+        renderVtsCountsTable(
+          prep.dataDetails.vts2.url || prep.dataDetails.vts2.label || "VTS 2",
+          prep.dataDetails.vts2.counts
+        )
       );
     }
   }

@@ -1347,7 +1347,7 @@ def run_vts_precheck() -> dict[str, Any]:
     messages: list[str] = []
     vts1_mins = vts.get_vts1_min_counts()
     vts2_mins = vts.get_vts2_min_counts()
-    messages.append("Checking VTS 1 …")
+    messages.append(f"Checking VTS 1 at {VTS1_URL} …")
     vts1_rules = ", ".join(f"{col} >= {req}" for col, req in vts1_mins.items())
     messages.append(f"  VTS 1 pre-check rules: {vts1_rules}")
     vts1_payload = vts.fetch_get_page(VTS1_URL)
@@ -1355,7 +1355,7 @@ def run_vts_precheck() -> dict[str, Any]:
     vts1_result = vts.check_min_counts(vts1_counts, vts1_mins, label="VTS 1")
     messages.extend(vts1_result["messages"])
 
-    messages.append("Checking VTS 2 …")
+    messages.append(f"Checking VTS 2 at {VTS2_URL} …")
     vts2_rules = ", ".join(f"{col} >= {req}" for col, req in vts2_mins.items())
     messages.append(f"  VTS 2 pre-check rules: {vts2_rules}")
     vts2_payload = vts.fetch_get_page(VTS2_URL)
@@ -1390,8 +1390,8 @@ def run_vts_precheck() -> dict[str, Any]:
     return {
         "success": True,
         "type": "data-loading-vts-precheck",
-        "vts1": vts1_result,
-        "vts2": vts2_result,
+        "vts1": {**vts1_result, "url": VTS1_URL},
+        "vts2": {**vts2_result, "url": VTS2_URL},
         "passedColumns": all_passed,
         "failedColumns": all_failed,
         "canProceed": can_proceed,
@@ -1407,12 +1407,14 @@ def run_vts_prep() -> dict[str, Any]:
     vts1_cols, vts2_cols = _prep_validation_columns()
 
     messages.append("=== Data details (countsPerColumn) ===")
+    messages.append(f"Validation counts for VTS 1 are read from {VTS1_URL}")
     vts1_payload = vts.fetch_get_page(VTS1_URL)
     vts1_counts = vts1_payload["countsPerColumn"]
     vts1_snapshot = vts.counts_snapshot(vts1_counts, vts1_cols)
     for col, count in vts1_snapshot.items():
         messages.append(f"  VTS 1 — {col}: {count if count is not None else 'missing'}")
 
+    messages.append(f"Validation counts for VTS 2 are read from {VTS2_URL}")
     vts2_payload = vts.fetch_get_page(VTS2_URL)
     vts2_counts = vts2_payload["countsPerColumn"]
     vts2_snapshot = vts.counts_snapshot(vts2_counts, vts2_cols)
@@ -1422,10 +1424,12 @@ def run_vts_prep() -> dict[str, Any]:
     data_details = {
         "vts1": {
             "label": "VTS 1",
+            "url": VTS1_URL,
             "counts": vts1_snapshot,
         },
         "vts2": {
             "label": "VTS 2",
+            "url": VTS2_URL,
             "counts": vts2_snapshot,
         },
     }
