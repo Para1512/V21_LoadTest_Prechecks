@@ -163,6 +163,12 @@ function renderTasks() {
     purpose.textContent = task.purpose;
     titleWrap.appendChild(titleRow);
     titleWrap.appendChild(purpose);
+    if (task.id === TASK_IDS.DATA_LOADING) {
+      const servers = document.createElement("div");
+      servers.className = "vts-server-note";
+      servers.textContent = vtsServerLine(vtsServerInfo);
+      titleWrap.appendChild(servers);
+    }
 
     const meta = document.createElement("div");
     meta.className = "task-meta";
@@ -216,6 +222,12 @@ function renderTasks() {
       limBtn.disabled = task.status === "Running";
       limBtn.addEventListener("click", () => void openVtsLimitsEditor());
       actions.appendChild(limBtn);
+      const serverBtn = document.createElement("button");
+      serverBtn.type = "button";
+      serverBtn.textContent = "VTS Servers";
+      serverBtn.disabled = task.status === "Running";
+      serverBtn.addEventListener("click", () => void openVtsServersEditor());
+      actions.appendChild(serverBtn);
     }
     card.appendChild(actions);
 
@@ -947,6 +959,14 @@ function renderDataLoadingVts(od) {
     od.phase === "error" ||
     guidance.length > 0 ||
     (od.validationSummary || []).some((r) => !r.passed);
+
+  const servers = od.vtsServers;
+  if (servers?.vts1?.host || servers?.vts2?.host) {
+    const used = document.createElement("p");
+    used.className = "vts-server-note";
+    used.textContent = vtsServerLine(servers);
+    root.appendChild(used);
+  }
 
   const intro = document.createElement("p");
   intro.className = "data-loading-intro";
@@ -1965,6 +1985,167 @@ async function openOracleQueriesEditor() {
   });
 }
 
+let vtsServerInfo = null;
+let vtsServersModalEl = null;
+
+function vtsServerLine(info) {
+  if (!info?.vts1 || !info?.vts2) {
+    return "VTS 1 and VTS 2 host and port load from the portal.";
+  }
+  const one = `${info.vts1.host}:${info.vts1.port}`;
+  const two = `${info.vts2.host}:${info.vts2.port}`;
+  return `VTS 1: ${one}    VTS 2: ${two}`;
+}
+
+function closeVtsServersEditor() {
+  if (vtsServersModalEl) {
+    vtsServersModalEl.remove();
+    vtsServersModalEl = null;
+  }
+}
+
+async function loadVtsServers() {
+  try {
+    const res = await fetch(apiUrl("/api/tasks/data-loading/vts-servers"));
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.success) {
+      throw new Error(payload.message || `HTTP ${res.status}`);
+    }
+    vtsServerInfo = payload;
+  } catch (_err) {
+    vtsServerInfo = null;
+  }
+  renderTasks();
+}
+
+async function openVtsServersEditor() {
+  closeVtsServersEditor();
+  const overlay = document.createElement("div");
+  overlay.className = "oracle-queries-overlay";
+  const panel = document.createElement("div");
+  panel.className = "oracle-queries-panel vts-limits-panel";
+
+  const title = document.createElement("h3");
+  title.textContent = "VTS servers";
+  panel.appendChild(title);
+
+  const hint = document.createElement("p");
+  hint.className = "oracle-queries-hint";
+  hint.textContent =
+    "These hosts and ports are used for pre-check, validation, clear, and import. Save, then run Data Loading again.";
+  panel.appendChild(hint);
+
+  const form = document.createElement("div");
+  form.className = "vts-limits-form";
+  form.textContent = "Loading VTS servers…";
+  panel.appendChild(form);
+
+  const actions = document.createElement("div");
+  actions.className = "oracle-queries-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => closeVtsServersEditor());
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "primary";
+  saveBtn.textContent = "Save servers";
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+  panel.appendChild(actions);
+
+  overlay.appendChild(panel);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeVtsServersEditor();
+  });
+  document.body.appendChild(overlay);
+  vtsServersModalEl = overlay;
+
+  let payload = vtsServerInfo;
+  try {
+    const res = await fetch(apiUrl("/api/tasks/data-loading/vts-servers"));
+    payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.success) {
+      throw new Error(payload.message || `HTTP ${res.status}`);
+    }
+  } catch (err) {
+    form.textContent = `Failed to load VTS servers: ${formatFetchFailureMessage(err)}`;
+    saveBtn.disabled = true;
+    return;
+  }
+
+  const inputs = {};
+  form.textContent = "";
+  [
+    { key: "vts1", title: "VTS 1", data: payload.vts1 || {} },
+    { key: "vts2", title: "VTS 2", data: payload.vts2 || {} }
+  ].forEach((group) => {
+    const section = document.createElement("div");
+    section.className = "vts-limits-section";
+    const heading = document.createElement("div");
+    heading.className = "disk-header";
+    heading.textContent = group.title;
+    section.appendChild(heading);
+    [
+      ["host", "Host", "text", group.data.host || ""],
+      ["port", "Port", "number", group.data.port ?? ""]
+    ].forEach(([field, label, type, value]) => {
+      const row = document.createElement("label");
+      row.className = "vts-limits-row";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const input = document.createElement("input");
+      input.type = type;
+      input.className = "vts-limits-input";
+      input.value = String(value);
+      if (type === "number") {
+        input.min = "1";
+        input.max = "65535";
+        input.step = "1";
+      }
+      inputs[`${group.key}.${field}`] = input;
+      row.appendChild(name);
+      row.appendChild(input);
+      section.appendChild(row);
+    });
+    form.appendChild(section);
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    cancelBtn.disabled = true;
+    try {
+      const res = await fetch(apiUrl("/api/tasks/data-loading/vts-servers"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vts1: {
+            host: inputs["vts1.host"].value.trim(),
+            port: inputs["vts1.port"].value.trim()
+          },
+          vts2: {
+            host: inputs["vts2.host"].value.trim(),
+            port: inputs["vts2.port"].value.trim()
+          }
+        })
+      });
+      const saved = await res.json().catch(() => ({}));
+      if (!res.ok || !saved.success) {
+        throw new Error(saved.message || `Save failed (HTTP ${res.status})`);
+      }
+      vtsServerInfo = saved;
+      closeVtsServersEditor();
+      renderTasks();
+    } catch (err) {
+      hint.textContent = `Save failed: ${formatFetchFailureMessage(err)}`;
+      hint.className = "oracle-queries-hint oracle-queries-error";
+    } finally {
+      saveBtn.disabled = false;
+      cancelBtn.disabled = false;
+    }
+  });
+}
+
 let vtsLimitsModalEl = null;
 
 function closeVtsLimitsEditor() {
@@ -2419,3 +2600,4 @@ crmEmailButton.addEventListener("click", () =>
 );
 
 renderTasks();
+void loadVtsServers();

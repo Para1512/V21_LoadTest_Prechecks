@@ -1268,6 +1268,15 @@ button:disabled {
   border-top: 1px solid var(--line);
 }
 
+.vts-server-note {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--accent-ink);
+  white-space: pre-wrap;
+}
+
 .vts-limits-panel {
   max-width: min(560px, 96vw);
 }

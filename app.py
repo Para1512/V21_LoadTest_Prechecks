@@ -388,6 +388,28 @@ def task_data_loading_vts_limits_put():
         return jsonify({"success": False, "message": str(e) or "Failed to save VTS limits."}), 500
 
 
+@app.route("/api/tasks/data-loading/vts-servers", methods=["GET"])
+def task_data_loading_vts_servers_get():
+    from tasks import data_loading as dl
+
+    return jsonify(dl.vts_endpoints_for_api())
+
+
+@app.route("/api/tasks/data-loading/vts-servers", methods=["PUT"])
+def task_data_loading_vts_servers_put():
+    from tasks import data_loading as dl
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"success": False, "message": "Expected VTS 1 and VTS 2 host and port."}), 400
+    try:
+        return jsonify(dl.save_vts_endpoints(body))
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e) or "Failed to save VTS servers."}), 500
+
+
 @app.route("/api/tasks/data-loading/vts-limits/reset", methods=["POST"])
 def task_data_loading_vts_limits_reset():
     from tasks import data_loading as dl

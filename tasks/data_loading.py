@@ -5,18 +5,27 @@ Task 1 — Data loading: VTS pre-checks, validation, clear, and Oracle P_BAN rel
 from __future__ import annotations
 
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+from dotenv import set_key
 
 from tasks import oracle_extract as ora
 from tasks import oracle_queries as oq
+from tasks.env_loader import ENV_PATH
 from tasks import vts_client as vts
 
-VTS1_URL = os.environ.get("VTS1_URL", "http://vwrenbptlrgap06:2244/").strip()
-VTS2_URL = os.environ.get("VTS2_URL", "http://vwrenbptlrgap06:2245/").strip()
+DEFAULT_VTS1_URL = "http://vwrenbptlrgap06:2244/"
+DEFAULT_VTS2_URL = "http://vwrenbptlrgap06:2245/"
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+VTS1_URL = os.environ.get("VTS1_URL", DEFAULT_VTS1_URL).strip()
+VTS2_URL = os.environ.get("VTS2_URL", DEFAULT_VTS2_URL).strip()
 
 VTS1_CLEAR_COLUMNS_STEP1 = list(vts.VTS1_CLEAR_COLUMNS)
 VTS2_CLEAR_COLUMNS_STEP1 = list(vts.VTS2_CLEAR_COLUMNS)
@@ -52,6 +61,61 @@ def save_vts_limits(body: dict[str, Any]) -> dict[str, Any]:
 
 def reset_vts_limits() -> dict[str, Any]:
     return vts.reset_min_counts()
+
+
+def _endpoint_from_url(url: str, *, label: str, default_url: str) -> dict[str, Any]:
+    raw = (url or default_url).strip()
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = parsed.hostname or ""
+    port = parsed.port
+    return {
+        "label": label,
+        "host": host,
+        "port": port,
+        "url": raw if raw.endswith("/") else f"{raw}/",
+    }
+
+
+def _normalize_endpoint(body: Any, *, label: str) -> str:
+    if not isinstance(body, dict):
+        raise ValueError(f"Enter a host and port for {label}.")
+    host = str(body.get("host") or "").strip()
+    if not _HOST_RE.match(host):
+        raise ValueError(f"{label} host must be a hostname or IP address, with no http:// or port.")
+    try:
+        port = int(str(body.get("port") or "").strip())
+    except (TypeError, ValueError):
+        port = 0
+    if port < 1 or port > 65535:
+        raise ValueError(f"{label} port must be a number from 1 to 65535.")
+    return f"http://{host}:{port}/"
+
+
+def vts_endpoints_for_api() -> dict[str, Any]:
+    return {
+        "success": True,
+        "vts1": _endpoint_from_url(VTS1_URL, label="VTS 1", default_url=DEFAULT_VTS1_URL),
+        "vts2": _endpoint_from_url(VTS2_URL, label="VTS 2", default_url=DEFAULT_VTS2_URL),
+    }
+
+
+def save_vts_endpoints(body: dict[str, Any]) -> dict[str, Any]:
+    """Save VTS 1 and VTS 2 host/port for this running portal and for the next start."""
+    global VTS1_URL, VTS2_URL
+    vts1_url = _normalize_endpoint(body.get("vts1"), label="VTS 1")
+    vts2_url = _normalize_endpoint(body.get("vts2"), label="VTS 2")
+    if vts1_url == vts2_url:
+        raise ValueError("VTS 1 and VTS 2 must use different host and port combinations.")
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not ENV_PATH.is_file():
+        ENV_PATH.write_text("", encoding="utf-8")
+    set_key(str(ENV_PATH), "VTS1_URL", vts1_url, encoding="utf-8")
+    set_key(str(ENV_PATH), "VTS2_URL", vts2_url, encoding="utf-8")
+    VTS1_URL = vts1_url
+    VTS2_URL = vts2_url
+    os.environ["VTS1_URL"] = vts1_url
+    os.environ["VTS2_URL"] = vts2_url
+    return vts_endpoints_for_api()
 
 
 def get_oracle_queries() -> dict[str, Any]:
@@ -206,10 +270,17 @@ def build_validation_summary(
     if precheck:
         for side, label in (("vts1", "VTS 1 pre-check"), ("vts2", "VTS 2 pre-check")):
             block = precheck.get(side) or {}
+            endpoint = _endpoint_from_url(
+                str(block.get("url") or ""),
+                label=label,
+                default_url=DEFAULT_VTS1_URL if side == "vts1" else DEFAULT_VTS2_URL,
+            )
+            where = f"{endpoint['host']}:{endpoint['port']}" if endpoint["host"] else ""
+            group = f"{label} ({where})" if where else label
             for check in block.get("checks") or []:
                 rows.append(
                     {
-                        "group": label,
+                        "group": group,
                         "name": check.get("column"),
                         "count": check.get("count"),
                         "required": check.get("required"),
@@ -1177,6 +1248,8 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
     messages: list[str] = []
     remediation_runs: list[dict[str, Any]] = []
 
+    messages.append(f"Using VTS 1 at {VTS1_URL}")
+    messages.append(f"Using VTS 2 at {VTS2_URL}")
     precheck = run_vts_precheck()
     messages.extend(precheck.get("messages") or [])
 
@@ -1215,6 +1288,7 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
             "guidance": build_user_guidance(precheck=precheck),
             "validationSummary": build_validation_summary(precheck=precheck),
             "queryDefaults": query_defaults(),
+            "vtsServers": vts_endpoints_for_api(),
         }
 
     prep = run_vts_prep()
@@ -1243,6 +1317,7 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
                     precheck=precheck, prep=prep
                 ),
                 "queryDefaults": query_defaults(),
+                "vtsServers": vts_endpoints_for_api(),
             }
 
     return {
@@ -1255,6 +1330,7 @@ def run_task1_flow(query_overrides: dict[str, str] | None = None) -> dict[str, A
         "guidance": [],
         "validationSummary": build_validation_summary(precheck=precheck, prep=prep),
         "queryDefaults": query_defaults(),
+        "vtsServers": vts_endpoints_for_api(),
     }
 
 
