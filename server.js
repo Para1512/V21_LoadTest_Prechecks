@@ -4,7 +4,7 @@ const cors = require("cors");
 const path = require("path");
 const nodemailer = require("nodemailer");
 const { randomUUID } = require("crypto");
-const { execFile, exec } = require("child_process");
+const { execFile, exec, spawn } = require("child_process");
 const { runServerLogSpaceCheck } = require("./lib/taskServerLogSpace");
 const { runPetHealthCheck, PET_HEALTH_URL } = require("./lib/taskPetHealth");
 const { checkReqcentralIssue } = require("./lib/reqcentralStatus");
@@ -452,6 +452,122 @@ app.post("/api/tasks/server-health-check/run", async (_req, res) => {
       success: false,
       message: error.message || "Server health check failed.",
       petUrl: PET_HEALTH_URL
+    });
+  }
+});
+
+function readRequestBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error("The PDF is larger than 20 MB."));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function multipartParts(body, contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
+  if (!match) return [];
+  const boundary = Buffer.from(`--${(match[1] || match[2]).trim()}`);
+  const parts = [];
+  let cursor = body.indexOf(boundary);
+  while (cursor !== -1) {
+    cursor += boundary.length;
+    if (body[cursor] === 45 && body[cursor + 1] === 45) break;
+    if (body[cursor] === 13 && body[cursor + 1] === 10) cursor += 2;
+    const next = body.indexOf(boundary, cursor);
+    if (next === -1) break;
+    let chunk = body.subarray(cursor, next);
+    if (chunk.length >= 2 && chunk[chunk.length - 2] === 13 && chunk[chunk.length - 1] === 10) {
+      chunk = chunk.subarray(0, chunk.length - 2);
+    }
+    const splitAt = chunk.indexOf("\r\n\r\n");
+    if (splitAt !== -1) {
+      const header = chunk.subarray(0, splitAt).toString("utf8");
+      const name = /name="([^"]+)"/i.exec(header);
+      const filename = /filename="([^"]*)"/i.exec(header);
+      parts.push({
+        name: name ? name[1] : "",
+        filename: filename ? filename[1] : "",
+        body: chunk.subarray(splitAt + 4)
+      });
+    }
+    cursor = next;
+  }
+  return parts;
+}
+
+function buildResourceCsv(reportName, pdfBuffer) {
+  const script = [
+    "import json, sys",
+    "from tasks.resource_utilization import ResourceReportError, build_resource_csv",
+    "name = sys.argv[1]",
+    "data = sys.stdin.buffer.read()",
+    "try:",
+    "    json.dump(build_resource_csv(name, data), sys.stdout)",
+    "except ResourceReportError as exc:",
+    "    json.dump({'success': False, 'message': str(exc), 'status': exc.status_code}, sys.stdout)",
+    "    raise SystemExit(2)",
+    "except Exception as exc:",
+    "    json.dump({'success': False, 'message': str(exc) or 'Could not build the resource utilization CSV.'}, sys.stdout)",
+    "    raise SystemExit(1)"
+  ].join("\n");
+  return new Promise((resolve, reject) => {
+    const child = spawn("python", ["-c", script, reportName], { cwd: __dirname });
+    const out = [];
+    const err = [];
+    child.stdout.on("data", (chunk) => out.push(chunk));
+    child.stderr.on("data", (chunk) => err.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const text = Buffer.concat(out).toString("utf8");
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch (_error) {
+        payload = null;
+      }
+      if (!payload) {
+        reject(new Error(Buffer.concat(err).toString("utf8").trim() || "Could not build the resource utilization CSV."));
+        return;
+      }
+      resolve({ code, payload });
+    });
+    child.stdin.write(pdfBuffer);
+    child.stdin.end();
+  });
+}
+
+app.post("/api/results/resource-utilization", async (req, res) => {
+  try {
+    const body = await readRequestBody(req, 20 * 1024 * 1024);
+    const parts = multipartParts(body, req.headers["content-type"]);
+    const reportPart = parts.find((part) => part.name === "reportName");
+    const filePart = parts.find((part) => part.name === "file");
+    const reportName = reportPart ? reportPart.body.toString("utf8").trim() : "";
+    if (!filePart || !filePart.body.length) {
+      res.status(400).json({ success: false, message: "Choose a Dynatrace dashboard PDF." });
+      return;
+    }
+    if (filePart.filename && !filePart.filename.toLowerCase().endsWith(".pdf")) {
+      res.status(400).json({ success: false, message: "Upload a PDF exported from the Dynatrace dashboard." });
+      return;
+    }
+    const { code, payload } = await buildResourceCsv(reportName, filePart.body);
+    res.status(payload.success ? 200 : payload.status || (code === 2 ? 400 : 500)).json(payload);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Could not build the resource utilization CSV."
     });
   }
 });

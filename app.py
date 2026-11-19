@@ -767,10 +767,18 @@ def results_page():
     return send_file(PUBLIC_DIR / "results.html")
 
 
-@app.route("/<path:subpath>", methods=["GET"])
+@app.route("/<path:subpath>", methods=["GET", "POST", "PUT", "DELETE"])
 def public_files(subpath: str):
-    if subpath.startswith("api"):
-        abort(404)
+    if subpath.startswith("api") or request.method != "GET":
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "The portal process does not have this action yet. Close it and start it again with start-portal.bat.",
+                }
+            ),
+            404,
+        )
     target = (PUBLIC_DIR / subpath).resolve()
     try:
         target.relative_to(PUBLIC_DIR.resolve())

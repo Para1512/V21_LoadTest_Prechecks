@@ -485,6 +485,11 @@ ruForm.addEventListener("submit", async (event) => {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload.success) {
+      if (response.status === 405) {
+        throw new Error(
+          "The running portal does not accept the PDF upload yet. Close it and start it again with start-portal.bat."
+        );
+      }
       throw new Error(payload.message || `Resource utilization failed (HTTP ${response.status}).`);
     }
     renderRuResult(payload);
