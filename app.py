@@ -29,6 +29,7 @@ from tasks.pet_health import PET_HEALTH_URL, run_pet_health_check
 from tasks.server_log_space import run_server_log_space_check
 from tasks.env_loader import load_project_env
 from tasks.tuxedo_stats_collate import CollateError, collect_and_collate, compare_abnormal_services
+from tasks.resource_utilization import ResourceReportError, build_resource_csv
 
 BASE_DIR = Path(__file__).resolve().parent
 _ENV_BOOT = load_project_env(create_from_example=True)
@@ -672,6 +673,25 @@ def task_server_health():
             ),
             500,
         )
+
+
+@app.route("/api/results/resource-utilization", methods=["POST"])
+def results_resource_utilization():
+    upload = request.files.get("file")
+    report_name = request.form.get("reportName") or ""
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "message": "Choose a Dynatrace dashboard PDF."}), 400
+    if not upload.filename.lower().endswith(".pdf"):
+        return jsonify({"success": False, "message": "Upload a PDF exported from the Dynatrace dashboard."}), 400
+    pdf_bytes = upload.read()
+    if len(pdf_bytes) > 20 * 1024 * 1024:
+        return jsonify({"success": False, "message": "The PDF is larger than 20 MB."}), 400
+    try:
+        return jsonify(build_resource_csv(report_name, pdf_bytes))
+    except ResourceReportError as exc:
+        return jsonify({"success": False, "message": str(exc)}), exc.status_code
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc) or "Could not build the resource utilization CSV."}), 500
 
 
 @app.route("/api/results/collate", methods=["POST"])

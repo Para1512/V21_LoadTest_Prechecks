@@ -21,7 +21,7 @@
             <p class="brand-kicker">Performance Engineering</p>
             <h1>Results Preparation</h1>
             <p class="brand-tag">
-              Collate Tuxedo stats after the load test. Keep PreChecks open in the other window.
+              Collate Tuxedo stats and build resource utilization after the load test.
             </p>
           </div>
         </div>
@@ -66,6 +66,39 @@
             <ol id="process-log-list" class="process-log-list"></ol>
           </section>
           <div id="collate-output"></div>
+        </section>
+
+        <section class="panel results-card">
+          <div class="results-card-head">
+            <h2>Resource utilization</h2>
+            <p class="panel-sub">
+              Upload the Dynatrace dashboard PDF. The portal builds RU_Stats.csv for the CSM online,
+              PRAPI, ESB CL, and ESB DG servers only.
+            </p>
+          </div>
+          <form id="ru-form" class="results-form">
+            <label class="results-field">
+              <span>Report name</span>
+              <input
+                id="ru-report-name"
+                name="reportName"
+                type="text"
+                placeholder="R1226_Reg_LoadTest"
+                required
+              />
+            </label>
+            <label class="results-field">
+              <span>Dynatrace PDF</span>
+              <input id="ru-pdf" name="file" type="file" accept="application/pdf,.pdf" required />
+            </label>
+            <button id="ru-btn" class="primary" type="submit">Generate CSV</button>
+          </form>
+          <p class="results-hint">
+            The report name is the first row. Text before the first _ is used on the section titles,
+            so R1226_Reg_LoadTest produces R1226 CSM OL PET1.
+          </p>
+          <div id="ru-feedback" class="feedback" role="status"></div>
+          <div id="ru-output"></div>
         </section>
       </main>
     </div>

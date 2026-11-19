@@ -427,3 +427,71 @@ form.addEventListener("submit", async (event) => {
     renderResult(currentPayload);
   }
 });
+
+const ruForm = document.getElementById("ru-form");
+const ruFeedback = document.getElementById("ru-feedback");
+const ruOutput = document.getElementById("ru-output");
+const ruButton = document.getElementById("ru-btn");
+
+function setRuFeedback(message, kind) {
+  ruFeedback.textContent = message || "";
+  ruFeedback.className = `feedback${kind ? ` feedback-${kind}` : ""}`;
+}
+
+function renderRuResult(payload) {
+  ruOutput.replaceChildren();
+  const actions = element("div", "results-actions");
+  const download = actionButton(
+    "Download RU_Stats.csv",
+    () => downloadText(payload.csv, payload.fileName || "RU_Stats.csv"),
+    "primary"
+  );
+  const copy = actionButton("Copy", () => void copyText(payload.csv, "RU_Stats.csv"));
+  actions.append(download, copy);
+  ruOutput.appendChild(actions);
+  if (payload.missing && payload.missing.length) {
+    ruOutput.appendChild(
+      element("p", "results-missing", `No value in the PDF for: ${payload.missing.join(", ")}.`)
+    );
+  }
+  const details = document.createElement("details");
+  details.appendChild(element("summary", "", "Preview"));
+  const pre = document.createElement("pre");
+  pre.className = "ru-preview";
+  pre.textContent = payload.csv;
+  details.appendChild(pre);
+  ruOutput.appendChild(details);
+}
+
+ruForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const reportName = document.getElementById("ru-report-name").value.trim();
+  const fileInput = document.getElementById("ru-pdf");
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) {
+    setRuFeedback("Choose a Dynatrace dashboard PDF.", "error");
+    return;
+  }
+  ruButton.disabled = true;
+  ruOutput.replaceChildren();
+  setRuFeedback("Reading the Dynatrace PDF and building RU_Stats.csv…", "running");
+  try {
+    const body = new FormData();
+    body.append("reportName", reportName);
+    body.append("file", file, file.name);
+    const response = await fetch(`${API_BASE_URL}/api/results/resource-utilization`, {
+      method: "POST",
+      body
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.success) {
+      throw new Error(payload.message || `Resource utilization failed (HTTP ${response.status}).`);
+    }
+    renderRuResult(payload);
+    setRuFeedback(`RU_Stats.csv is ready. ${payload.serverCount} servers included.`, "ok");
+  } catch (error) {
+    setRuFeedback(formatFetchFailureMessage(error), "error");
+  } finally {
+    ruButton.disabled = false;
+  }
+});
